@@ -145,8 +145,6 @@ final class LoginFlow {
 
                         Mono<? extends ClientMessage> response = Mono.defer(() ->
                                 authentication.nextToken(token.getSspiBuffer()))
-                            .switchIfEmpty(Mono.error(new IllegalStateException(
-                                "Integrated authentication did not produce an SSPI response token")))
                             .map(SspiMessage::create);
 
                         requests.emitNext(response, Sinks.EmitFailureHandler.FAIL_FAST);

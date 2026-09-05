@@ -78,6 +78,32 @@ final class WindowsSspiAuthenticationUnitTests {
     }
 
     @Test
+    void shouldCompleteWithoutFinalClientToken() {
+
+        byte[] initialToken = new byte[]{0x60, 0x01, 0x02};
+        byte[] finalServerToken = new byte[]{0x31, 0x32};
+
+        TestSspiSupport sspi = new TestSspiSupport();
+        sspi.addResult(W32Errors.SEC_I_CONTINUE_NEEDED, initialToken);
+        sspi.addResult(W32Errors.SEC_E_OK, new byte[0]);
+
+        WindowsSspiAuthentication authentication = new WindowsSspiAuthentication(
+            "MSSQLSvc/sql.example.com:1433", sspi, Schedulers.immediate());
+
+        StepVerifier.create(authentication.initialToken())
+            .expectNextMatches(actual -> Arrays.equals(actual, initialToken))
+            .verifyComplete();
+
+        StepVerifier.create(authentication.nextToken(finalServerToken))
+            .verifyComplete();
+
+        assertThat(sspi.inputs).hasSize(2);
+        assertThat(sspi.inputs.get(1)).containsExactly(finalServerToken);
+
+        StepVerifier.create(authentication.close()).verifyComplete();
+    }
+
+    @Test
     void shouldCompleteSspiTokenWhenRequested() {
 
         TestSspiSupport sspi = new TestSspiSupport();

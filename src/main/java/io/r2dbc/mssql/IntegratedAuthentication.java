@@ -38,7 +38,9 @@ interface IntegratedAuthentication {
      * Process a server SSPI challenge and produce the next client response token.
      *
      * @param serverToken the server SSPI challenge.
-     * @return a {@link Mono} emitting exactly one authentication response token.
+     * @return a {@link Mono} emitting an authentication response token, or completing empty when
+     * the authentication context is complete and no final client token needs to be sent to the
+     * server.
      */
     Mono<byte[]> nextToken(byte[] serverToken);
 

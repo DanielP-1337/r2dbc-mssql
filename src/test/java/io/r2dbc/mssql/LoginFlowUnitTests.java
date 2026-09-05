@@ -198,6 +198,77 @@ class LoginFlowUnitTests {
         assertThat(closed).isTrue();
     }
 
+    @Test
+    void shouldCompleteIntegratedAuthenticationWithoutFinalClientToken() {
+
+        List<Prelogin.Token> tokens = new ArrayList<>();
+
+        tokens.add(new Prelogin.Version(14, 0));
+        tokens.add(new Prelogin.Encryption(Prelogin.Encryption.ENCRYPT_NOT_SUP));
+        tokens.add(Prelogin.Terminator.INSTANCE);
+        Prelogin preloginResponse = new Prelogin(tokens);
+
+        byte[] initialToken = new byte[]{0x60, 0x01, 0x02};
+        byte[] challenge = new byte[]{0x11, 0x12};
+        byte[] response = new byte[]{0x21, 0x22, 0x23};
+        byte[] finalServerToken = new byte[]{0x31, 0x32, 0x33};
+
+        SspiToken serverChallenge = sspiToken(challenge);
+        SspiToken serverFinalToken = sspiToken(finalServerToken);
+
+        AtomicInteger round = new AtomicInteger();
+        AtomicBoolean closed = new AtomicBoolean();
+
+        IntegratedAuthentication authentication = new IntegratedAuthentication() {
+
+            @Override
+            public Mono<byte[]> initialToken() {
+                return Mono.just(initialToken);
+            }
+
+            @Override
+            public Mono<byte[]> nextToken(byte[] serverToken) {
+
+                int currentRound = round.getAndIncrement();
+
+                if (currentRound == 0) {
+                    assertThat(serverToken).containsExactly(challenge);
+                    return Mono.just(response);
+                }
+
+                assertThat(currentRound).isEqualTo(1);
+                assertThat(serverToken).containsExactly(finalServerToken);
+                return Mono.empty();
+            }
+
+            @Override
+            public Mono<Void> close() {
+                return Mono.fromRunnable(() -> closed.set(true));
+            }
+        };
+
+        TestClient client = TestClient.builder()
+            .window()
+            .assertNextRequestWith(actual -> assertThat(actual).isInstanceOf(Prelogin.class))
+            .thenRespond(preloginResponse)
+            .assertNextRequestWith(actual -> assertThat(actual).isInstanceOf(Login7.class))
+            .thenRespond(serverChallenge)
+            .assertNextRequestWith(actual -> assertSspiMessage(actual, response))
+            .thenRespond(serverFinalToken, DoneToken.create(0))
+            .done()
+            .build();
+
+        LoginConfiguration login = new LoginConfiguration("app", null, "db", "host", "bar", "server", false, "foo");
+
+        LoginFlow.exchange(client, login, authentication)
+            .as(StepVerifier::create)
+            .expectNext(DoneToken.create(0))
+            .verifyComplete();
+
+        assertThat(round).hasValue(2);
+        assertThat(closed).isTrue();
+    }
+
     private static SspiToken sspiToken(byte[] payload) {
 
         ByteBuf buffer = Unpooled.buffer(payload.length + 2);

@@ -105,6 +105,7 @@ final class WindowsSspiAuthentication implements IntegratedAuthentication {
         return Mono.fromRunnable(this::releaseResources).subscribeOn(this.scheduler).then();
     }
 
+    @Nullable
     private synchronized byte[] createToken(@Nullable byte[] inputToken, boolean initial) {
 
         Assert.state(!this.closed, "Integrated authentication is already closed");
@@ -151,6 +152,10 @@ final class WindowsSspiAuthentication implements IntegratedAuthentication {
 
         if (initial && (token == null || token.length == 0)) {
             throw new IllegalStateException("InitializeSecurityContext did not produce an initial SSPI token");
+        }
+
+        if (!initial && status == W32Errors.SEC_E_OK && (token == null || token.length == 0)) {
+            return null;
         }
 
         return token == null ? new byte[0] : token;
