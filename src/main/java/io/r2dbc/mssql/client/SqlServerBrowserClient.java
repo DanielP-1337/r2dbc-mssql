@@ -29,7 +29,7 @@ import reactor.netty.udp.UdpClient;
  *
  * @author Daniel Pachali
  */
-final class SqlServerBrowserClient {
+public final class SqlServerBrowserClient {
 
     private static final int DEFAULT_BROWSER_PORT = 1434;
 
@@ -42,7 +42,7 @@ final class SqlServerBrowserClient {
     /**
      * Create a SQL Server Browser client using UDP port {@code 1434}.
      */
-    SqlServerBrowserClient() {
+    public SqlServerBrowserClient() {
         this(DEFAULT_BROWSER_PORT, DEFAULT_TIMEOUT);
     }
 
@@ -73,7 +73,7 @@ final class SqlServerBrowserClient {
      * @param instanceName the SQL Server instance name.
      * @return a {@link Mono} emitting the resolved TCP port.
      */
-    Mono<Integer> resolvePort(String host, String instanceName) {
+    public Mono<Integer> resolvePort(String host, String instanceName) {
 
         Assert.requireNonNull(host, "host must not be null");
         Assert.requireNonNull(instanceName, "instanceName must not be null");

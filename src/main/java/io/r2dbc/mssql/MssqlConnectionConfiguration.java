@@ -202,6 +202,14 @@ public final class MssqlConnectionConfiguration {
         );
     }
 
+    MssqlConnectionConfiguration withResolvedPort(int port) {
+        return new MssqlConnectionConfiguration(this.applicationName, this.connectionId, this.connectionProvider, this.connectTimeout, this.database, this.host, this.hostNameInCertificate,
+            this.instanceName, this.lockWaitTimeout,
+            this.password,
+            this.preferCursoredExecution, port, true, this.sendStringParametersAsUnicode, this.ssl, this.sslContextBuilderCustomizer,
+            this.sslTunnelSslContextBuilderCustomizer, this.tcpKeepAlive, this.tcpNoDelay, this.trustServerCertificate, this.trustStore, this.trustStoreType, this.trustStorePassword, this.username
+        );
+    }
     public ClientConfiguration toClientConfiguration() {
         return new DefaultClientConfiguration(this.connectionProvider, this.connectTimeout, this.host, this.hostNameInCertificate, this.port, this.ssl, this.sslContextBuilderCustomizer,
             this.sslTunnelSslContextBuilderCustomizer, this.tcpKeepAlive, this.tcpNoDelay, this.trustServerCertificate, this.trustStore, this.trustStoreType, this.trustStorePassword
