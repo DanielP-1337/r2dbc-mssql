@@ -78,6 +78,54 @@ final class WindowsSspiAuthenticationUnitTests {
     }
 
     @Test
+    void shouldUseSecurityPackageMaximumTokenSize() {
+
+        byte[] initialToken = new byte[]{0x60, 0x01};
+        byte[] challenge = new byte[]{0x11};
+        byte[] response = new byte[]{0x21, 0x22};
+
+        TestSspiSupport sspi = new TestSspiSupport();
+        sspi.maxTokenSize = 32768;
+        sspi.addResult(W32Errors.SEC_I_CONTINUE_NEEDED, initialToken);
+        sspi.addResult(W32Errors.SEC_E_OK, response);
+
+        WindowsSspiAuthentication authentication = new WindowsSspiAuthentication(
+            "MSSQLSvc/sql.example.com:1433", sspi, Schedulers.immediate());
+
+        StepVerifier.create(authentication.initialToken())
+            .expectNextMatches(actual -> Arrays.equals(actual, initialToken))
+            .verifyComplete();
+
+        StepVerifier.create(authentication.nextToken(challenge))
+            .expectNextMatches(actual -> Arrays.equals(actual, response))
+            .verifyComplete();
+
+        assertThat(sspi.queryMaxTokenSizeCount).isEqualTo(1);
+        assertThat(sspi.outputBufferSizes).containsExactly(32768, 32768);
+
+        StepVerifier.create(authentication.close()).verifyComplete();
+    }
+
+    @Test
+    void shouldRejectInvalidSecurityPackageMaximumTokenSize() {
+
+        TestSspiSupport sspi = new TestSspiSupport();
+        sspi.maxTokenSize = 0;
+
+        WindowsSspiAuthentication authentication = new WindowsSspiAuthentication(
+            "MSSQLSvc/sql.example.com:1433", sspi, Schedulers.immediate());
+
+        StepVerifier.create(authentication.initialToken())
+            .expectErrorMatches(error -> error instanceof IllegalStateException &&
+                error.getMessage().contains("positive maximum token size"))
+            .verify();
+
+        assertThat(sspi.queryMaxTokenSizeCount).isEqualTo(1);
+        assertThat(sspi.acquireCount).isZero();
+
+        StepVerifier.create(authentication.close()).verifyComplete();
+    }
+    @Test
     void shouldCompleteWithoutFinalClientToken() {
 
         byte[] initialToken = new byte[]{0x60, 0x01, 0x02};
@@ -171,6 +219,12 @@ final class WindowsSspiAuthenticationUnitTests {
 
         private final List<String> targetNames = new ArrayList<>();
 
+        private final List<Integer> outputBufferSizes = new ArrayList<>();
+
+        private int maxTokenSize = 48000;
+
+        private int queryMaxTokenSizeCount;
+
         private int acquireStatus = W32Errors.SEC_E_OK;
 
         private int acquireCount;
@@ -187,6 +241,11 @@ final class WindowsSspiAuthenticationUnitTests {
             this.results.add(new Result(status, token));
         }
 
+        @Override
+        public int queryMaxTokenSize() {
+            this.queryMaxTokenSizeCount++;
+            return this.maxTokenSize;
+        }
         @Override
         public int acquireCredentialsHandle(CredHandle credentials, TimeStamp expiry) {
 
@@ -207,6 +266,7 @@ final class WindowsSspiAuthenticationUnitTests {
 
             this.targetNames.add(targetName);
             this.inputs.add(input == null ? null : input.getBuffer(0).getBytes());
+            this.outputBufferSizes.add(output.getBuffer(0).cbBuffer);
 
             Result result = this.results.get(this.resultIndex++);
 

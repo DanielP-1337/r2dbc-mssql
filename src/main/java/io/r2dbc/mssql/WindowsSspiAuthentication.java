@@ -19,6 +19,7 @@ package io.r2dbc.mssql;
 import com.sun.jna.Platform;
 import com.sun.jna.platform.win32.Secur32;
 import com.sun.jna.platform.win32.Sspi;
+import com.sun.jna.platform.win32.Sspi.PSecPkgInfo;
 import com.sun.jna.platform.win32.Sspi.CredHandle;
 import com.sun.jna.platform.win32.Sspi.CtxtHandle;
 import com.sun.jna.platform.win32.Sspi.TimeStamp;
@@ -43,7 +44,7 @@ import java.util.Arrays;
  */
 final class WindowsSspiAuthentication implements IntegratedAuthentication {
 
-    private static final int MAX_TOKEN_SIZE = 65536;
+    private static final String SECURITY_PACKAGE = "Negotiate";
 
     private static final int SEC_I_COMPLETE_NEEDED = 0x00090313;
 
@@ -54,6 +55,8 @@ final class WindowsSspiAuthentication implements IntegratedAuthentication {
     private final SspiSupport sspi;
 
     private final Scheduler scheduler;
+
+    private int maxTokenSize;
 
     private final CredHandle credentials = new CredHandle();
 
@@ -112,6 +115,9 @@ final class WindowsSspiAuthentication implements IntegratedAuthentication {
 
         if (initial) {
             Assert.state(!this.started, "Initial SSPI token has already been created");
+            this.maxTokenSize = this.sspi.queryMaxTokenSize();
+            Assert.state(this.maxTokenSize > 0,
+                "Negotiate security package must report a positive maximum token size");
             acquireCredentials();
             this.started = true;
         } else {
@@ -122,7 +128,7 @@ final class WindowsSspiAuthentication implements IntegratedAuthentication {
         ManagedSecBufferDesc input = inputToken == null
             ? null
             : new ManagedSecBufferDesc(Sspi.SECBUFFER_TOKEN, inputToken);
-        ManagedSecBufferDesc output = new ManagedSecBufferDesc(Sspi.SECBUFFER_TOKEN, MAX_TOKEN_SIZE);
+        ManagedSecBufferDesc output = new ManagedSecBufferDesc(Sspi.SECBUFFER_TOKEN, this.maxTokenSize);
 
         int status = this.sspi.initializeSecurityContext(this.credentials,
             this.contextAcquired ? this.context : null, this.targetName, input, this.context, output,
@@ -226,6 +232,8 @@ final class WindowsSspiAuthentication implements IntegratedAuthentication {
 
     interface SspiSupport {
 
+        int queryMaxTokenSize();
+
         int acquireCredentialsHandle(CredHandle credentials, TimeStamp expiry);
 
         int initializeSecurityContext(CredHandle credentials, @Nullable CtxtHandle context, String targetName,
@@ -249,8 +257,37 @@ final class WindowsSspiAuthentication implements IntegratedAuthentication {
         }
 
         @Override
+        public int queryMaxTokenSize() {
+
+            PSecPkgInfo packageInfo = new PSecPkgInfo();
+            int status = this.secur32.QuerySecurityPackageInfo(SECURITY_PACKAGE, packageInfo);
+
+            if (status != W32Errors.SEC_E_OK) {
+                throw sspiFailure("QuerySecurityPackageInfo", status);
+            }
+
+            try {
+
+                if (packageInfo.pPkgInfo == null) {
+                    throw new IllegalStateException(
+                        "QuerySecurityPackageInfo did not return security package information");
+                }
+
+                return packageInfo.pPkgInfo.cbMaxToken;
+            } finally {
+
+                if (packageInfo.pPkgInfo != null) {
+                    int freeStatus = this.secur32.FreeContextBuffer(packageInfo.pPkgInfo.getPointer());
+
+                    if (freeStatus != W32Errors.SEC_E_OK) {
+                        throw sspiFailure("FreeContextBuffer", freeStatus);
+                    }
+                }
+            }
+        }
+        @Override
         public int acquireCredentialsHandle(CredHandle credentials, TimeStamp expiry) {
-            return this.secur32.AcquireCredentialsHandle(null, "Negotiate", Sspi.SECPKG_CRED_OUTBOUND,
+            return this.secur32.AcquireCredentialsHandle(null, SECURITY_PACKAGE, Sspi.SECPKG_CRED_OUTBOUND,
                 null, null, null, null, credentials, expiry);
         }
 
