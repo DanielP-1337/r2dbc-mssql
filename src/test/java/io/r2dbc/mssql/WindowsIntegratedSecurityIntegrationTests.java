@@ -36,6 +36,8 @@ final class WindowsIntegratedSecurityIntegrationTests {
 
     private static final String DATABASE = "R2DBC_MSSQL_INTEGRATED_DATABASE";
 
+    private static final String EXPECTED_AUTH_SCHEME = "R2DBC_MSSQL_INTEGRATED_EXPECTED_AUTH_SCHEME";
+
     private static final String EXPECTED_USER = "R2DBC_MSSQL_INTEGRATED_EXPECTED_USER";
 
     private static final String HOST = "R2DBC_MSSQL_INTEGRATED_HOST";
@@ -77,19 +79,37 @@ final class WindowsIntegratedSecurityIntegrationTests {
         }
 
         String expectedUser = System.getenv(EXPECTED_USER);
+        String expectedAuthScheme = System.getenv(EXPECTED_AUTH_SCHEME);
 
         MssqlConnectionFactory connectionFactory = new MssqlConnectionFactory(builder.build());
 
         Flux.usingWhen(connectionFactory.create(),
-                connection -> Flux.from(connection.createStatement("SELECT SUSER_SNAME()").execute())
-                    .flatMap(result -> result.map((row, rowMetadata) -> row.get(0, String.class))),
+                connection -> Flux.from(connection.createStatement(
+                        "SELECT SUSER_SNAME(), " +
+                            "CAST(CONNECTIONPROPERTY('auth_scheme') AS varchar(40))").execute())
+                    .flatMap(result -> result.map((row, rowMetadata) ->
+                        new AuthenticationDetails(
+                            row.get(0, String.class),
+                            row.get(1, String.class)))),
                 MssqlConnection::close)
             .as(StepVerifier::create)
-            .assertNext(actualUser -> {
-                assertThat(actualUser).isNotBlank();
+            .assertNext(authentication -> {
+
+                assertThat(authentication.user).isNotBlank();
+                assertThat(authentication.authScheme).isNotBlank();
+
+                assertThat(authentication.authScheme)
+                    .as("Windows Integrated Security authentication scheme")
+                    .isIn("KERBEROS", "NTLM");
 
                 if (hasText(expectedUser)) {
-                    assertThat(actualUser).isEqualToIgnoringCase(expectedUser);
+                    assertThat(authentication.user)
+                        .isEqualToIgnoringCase(expectedUser);
+                }
+
+                if (hasText(expectedAuthScheme)) {
+                    assertThat(authentication.authScheme)
+                        .isEqualToIgnoringCase(expectedAuthScheme);
                 }
             })
             .verifyComplete();
@@ -100,6 +120,20 @@ final class WindowsIntegratedSecurityIntegrationTests {
     }
 
     private static boolean isWindows() {
-        return System.getProperty("os.name", "").toLowerCase(Locale.ENGLISH).contains("win");
+        return System.getProperty("os.name", "")
+            .toLowerCase(Locale.ENGLISH)
+            .contains("win");
+    }
+
+    private static final class AuthenticationDetails {
+
+        private final String user;
+
+        private final String authScheme;
+
+        private AuthenticationDetails(String user, String authScheme) {
+            this.user = user;
+            this.authScheme = authScheme;
+        }
     }
 }
