@@ -33,6 +33,7 @@ import reactor.util.annotation.Nullable;
 import java.nio.charset.Charset;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
@@ -66,6 +67,141 @@ class MssqlConnectionFactoryUnitTests {
             .withMessage("configuration must not be null");
     }
 
+    @Test
+    void constructorNoInstancePortResolver() {
+        assertThatIllegalArgumentException().isThrownBy(() -> new MssqlConnectionFactory(config -> Mono.empty(),
+            (java.util.function.BiFunction<String, String, Mono<Integer>>) null, this.configuration))
+            .withMessage("instancePortResolver must not be null");
+    }
+
+    @Test
+    void shouldResolveNamedInstanceWhenPortIsNotExplicitlyConfigured() {
+
+        MssqlConnectionConfiguration configuration = MssqlConnectionConfiguration.builder()
+            .host("sql01")
+            .instanceName("SQLEXPRESS")
+            .username("user")
+            .password("password")
+            .build();
+
+        AtomicReference<String> resolvedHost = new AtomicReference<>();
+        AtomicReference<String> resolvedInstance = new AtomicReference<>();
+
+        MssqlConnectionFactory connectionFactory = new MssqlConnectionFactory(config -> Mono.empty(), (host, instanceName) -> {
+            resolvedHost.set(host);
+            resolvedInstance.set(instanceName);
+            return Mono.just(51432);
+        }, configuration);
+
+        StepVerifier.create(connectionFactory.resolveConfiguration(configuration))
+            .assertNext(resolved -> {
+                assertThat(resolved.getHost()).isEqualTo("sql01");
+                assertThat(resolved.getInstanceName()).contains("SQLEXPRESS");
+                assertThat(resolved.getPort()).isEqualTo(51432);
+                assertThat(resolved.isPortConfigured()).isTrue();
+            })
+            .verifyComplete();
+
+        assertThat(resolvedHost.get()).isEqualTo("sql01");
+        assertThat(resolvedInstance.get()).isEqualTo("SQLEXPRESS");
+    }
+
+    @Test
+    void shouldSkipNamedInstanceResolutionWithoutInstanceName() {
+
+        AtomicBoolean resolverCalled = new AtomicBoolean();
+        MssqlConnectionFactory connectionFactory = new MssqlConnectionFactory(config -> Mono.empty(), (host, instanceName) -> {
+            resolverCalled.set(true);
+            return Mono.just(51432);
+        }, this.configuration);
+
+        StepVerifier.create(connectionFactory.resolveConfiguration(this.configuration))
+            .expectNext(this.configuration)
+            .verifyComplete();
+
+        assertThat(resolverCalled.get()).isFalse();
+    }
+
+    @Test
+    void shouldSkipNamedInstanceResolutionWhenPortIsExplicitlyConfigured() {
+
+        MssqlConnectionConfiguration configuration = MssqlConnectionConfiguration.builder()
+            .host("sql01")
+            .instanceName("SQLEXPRESS")
+            .port(1433)
+            .username("user")
+            .password("password")
+            .build();
+
+        AtomicBoolean resolverCalled = new AtomicBoolean();
+        MssqlConnectionFactory connectionFactory = new MssqlConnectionFactory(config -> Mono.empty(), (host, instanceName) -> {
+            resolverCalled.set(true);
+            return Mono.just(51432);
+        }, configuration);
+
+        StepVerifier.create(connectionFactory.resolveConfiguration(configuration))
+            .expectNext(configuration)
+            .verifyComplete();
+
+        assertThat(resolverCalled.get()).isFalse();
+        assertThat(configuration.getPort()).isEqualTo(1433);
+        assertThat(configuration.isPortConfigured()).isTrue();
+    }
+
+    @Test
+    void shouldPropagateNamedInstanceResolutionFailure() {
+
+        MssqlConnectionConfiguration configuration = MssqlConnectionConfiguration.builder()
+            .host("sql01")
+            .instanceName("SQLEXPRESS")
+            .username("user")
+            .password("password")
+            .build();
+
+        MssqlConnectionFactory connectionFactory = new MssqlConnectionFactory(config -> Mono.empty(),
+            (host, instanceName) -> Mono.error(new IllegalStateException("browser failure")), configuration);
+
+        StepVerifier.create(connectionFactory.resolveConfiguration(configuration))
+            .expectErrorMatches(error -> error instanceof IllegalStateException && error.getMessage().equals("browser failure"))
+            .verify();
+    }
+
+    @Test
+    void shouldConnectUsingResolvedNamedInstancePort() {
+
+        ColumnMetadataToken columns = ColumnMetadataToken.create(COLUMNS);
+        RowToken rowToken = RowTokenFactory.create(columns, buffer -> {
+            Encode.uString(buffer, "Edition", ServerCharset.UNICODE.charset());
+            Encode.uString(buffer, "1.2.3", ServerCharset.CP1252.charset());
+        });
+
+        TestClient client = TestClient.builder().assertNextRequestWith(clientMessage -> {
+            assertThat(clientMessage).isInstanceOf(Prelogin.class);
+        }).thenRespond(DoneToken.create(0)).assertNextRequestWith(clientMessage -> {
+            assertThat(clientMessage).isInstanceOf(SqlBatch.class);
+        }).thenRespond(columns, rowToken, DoneToken.create(1)).build();
+
+        MssqlConnectionConfiguration configuration = MssqlConnectionConfiguration.builder()
+            .host("sql01")
+            .instanceName("SQLEXPRESS")
+            .username("user")
+            .password("password")
+            .build();
+
+        AtomicReference<MssqlConnectionConfiguration> connectedConfiguration = new AtomicReference<>();
+
+        MssqlConnectionFactory connectionFactory = new MssqlConnectionFactory(config -> {
+            connectedConfiguration.set(config);
+            return Mono.just(client);
+        }, (host, instanceName) -> Mono.just(51432), configuration);
+
+        connectionFactory.create().as(StepVerifier::create).expectNextCount(1).verifyComplete();
+
+        assertThat(connectedConfiguration.get()).isNotNull();
+        assertThat(connectedConfiguration.get().getHost()).isEqualTo("sql01");
+        assertThat(connectedConfiguration.get().getPort()).isEqualTo(51432);
+        assertThat(connectedConfiguration.get().isPortConfigured()).isTrue();
+    }
     @Test
     void shouldFollowRedirect() {
 
@@ -146,6 +282,77 @@ class MssqlConnectionFactoryUnitTests {
         MssqlConnectionFactory connectionFactory = new MssqlConnectionFactory(config -> Mono.just(client), config -> {
 
             assertThat(config.getServicePrincipalName()).isEqualTo("MSSQLSvc/sql.example.com:1444");
+            authenticationCreated.set(true);
+
+            return new IntegratedAuthentication() {
+
+                @Override
+                public Mono<byte[]> initialToken() {
+                    return Mono.just(new byte[]{0x60, 0x01, 0x02});
+                }
+
+                @Override
+                public Mono<byte[]> nextToken(byte[] serverToken) {
+                    return Mono.error(new AssertionError("Unexpected SSPI challenge"));
+                }
+
+                @Override
+                public Mono<Void> close() {
+                    return Mono.fromRunnable(() -> authenticationClosed.set(true)).then();
+                }
+            };
+        }, configuration);
+
+        connectionFactory.create().as(StepVerifier::create).expectNextCount(1).verifyComplete();
+
+        assertThat(authenticationCreated).isTrue();
+        assertThat(authenticationClosed).isTrue();
+    }
+
+    @Test
+    void shouldUseResolvedNamedInstancePortForIntegratedAuthentication() {
+
+        Prelogin preloginResponse = new Prelogin(Arrays.asList(
+            new Prelogin.Version(14, 0),
+            new Prelogin.Encryption(Prelogin.Encryption.ENCRYPT_NOT_SUP),
+            Prelogin.Terminator.INSTANCE));
+
+        ColumnMetadataToken columns = ColumnMetadataToken.create(COLUMNS);
+        RowToken rowToken = RowTokenFactory.create(columns, buffer -> {
+            Encode.uString(buffer, "Edition", ServerCharset.UNICODE.charset());
+            Encode.uString(buffer, "1.2.3", ServerCharset.CP1252.charset());
+        });
+
+        TestClient client = TestClient.builder()
+            .window()
+            .assertNextRequestWith(actual -> assertThat(actual).isInstanceOf(Prelogin.class))
+            .thenRespond(preloginResponse)
+            .assertNextRequestWith(actual -> assertThat(actual).isInstanceOf(Login7.class))
+            .thenRespond(DoneToken.create(0))
+            .done()
+            .assertNextRequestWith(actual -> assertThat(actual).isInstanceOf(SqlBatch.class))
+            .thenRespond(columns, rowToken, DoneToken.create(1))
+            .build();
+
+        MssqlConnectionConfiguration configuration = MssqlConnectionConfiguration.builder()
+            .host("sql.example.com")
+            .instanceName("SQLEXPRESS")
+            .integratedSecurity()
+            .build();
+
+        AtomicBoolean authenticationCreated = new AtomicBoolean();
+        AtomicBoolean authenticationClosed = new AtomicBoolean();
+
+        MssqlConnectionFactory connectionFactory = new MssqlConnectionFactory(config -> {
+            assertThat(config.getPort()).isEqualTo(51432);
+            return Mono.just(client);
+        }, (host, instanceName) -> {
+            assertThat(host).isEqualTo("sql.example.com");
+            assertThat(instanceName).isEqualTo("SQLEXPRESS");
+            return Mono.just(51432);
+        }, config -> {
+
+            assertThat(config.getServicePrincipalName()).isEqualTo("MSSQLSvc/sql.example.com:51432");
             authenticationCreated.set(true);
 
             return new IntegratedAuthentication() {

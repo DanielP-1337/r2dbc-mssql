@@ -71,6 +71,11 @@ final class MssqlConnectionConfigurationUnitTests {
         assertThatIllegalArgumentException().isThrownBy(() -> MssqlConnectionConfiguration.builder().host(null))
                 .withMessage("host must not be null");
     }
+    @Test
+    void builderNoInstanceName() {
+        assertThatIllegalArgumentException().isThrownBy(() -> MssqlConnectionConfiguration.builder().instanceName(null))
+                .withMessage("instanceName must not be null");
+    }
 
     @Test
     void builderNoPassword() {
@@ -93,6 +98,7 @@ final class MssqlConnectionConfigurationUnitTests {
                 .connectionId(connectionId)
                 .database("test-database")
                 .host("test-host")
+                .instanceName("SQLEXPRESS")
                 .password("test-password")
                 .preferCursoredExecution(TRUE)
                 .port(100)
@@ -106,9 +112,11 @@ final class MssqlConnectionConfigurationUnitTests {
                 .hasFieldOrPropertyWithValue("connectionProvider", connectionProvider)
                 .hasFieldOrPropertyWithValue("database", "test-database")
                 .hasFieldOrPropertyWithValue("host", "test-host")
+                .hasFieldOrPropertyWithValue("instanceName", "SQLEXPRESS")
                 .hasFieldOrPropertyWithValue("password", "test-password")
                 .hasFieldOrPropertyWithValue("preferCursoredExecution", TRUE)
                 .hasFieldOrPropertyWithValue("port", 100)
+                .hasFieldOrPropertyWithValue("portConfigured", true)
                 .hasFieldOrPropertyWithValue("username", "test-username")
                 .hasFieldOrPropertyWithValue("sendStringParametersAsUnicode", false);
 
@@ -128,11 +136,30 @@ final class MssqlConnectionConfigurationUnitTests {
                 .hasFieldOrPropertyWithValue("applicationName", "r2dbc")
                 .hasFieldOrPropertyWithValue("database", "test-database")
                 .hasFieldOrPropertyWithValue("host", "test-host")
+                .hasFieldOrPropertyWithValue("instanceName", null)
                 .hasFieldOrPropertyWithValue("password", "test-password")
                 .hasFieldOrPropertyWithValue("port", 1433)
+                .hasFieldOrPropertyWithValue("portConfigured", false)
                 .hasFieldOrPropertyWithValue("username", "test-username")
                 .hasFieldOrPropertyWithValue("integratedSecurity", false)
                 .hasFieldOrPropertyWithValue("sendStringParametersAsUnicode", true);
+    }
+
+    @Test
+    void namedInstanceRedirectPreservesIntegratedSecurity() {
+        MssqlConnectionConfiguration configuration = MssqlConnectionConfiguration.builder()
+                .host("sql.example.com")
+                .instanceName("SQLEXPRESS")
+                .integratedSecurity()
+                .build();
+
+        MssqlConnectionConfiguration redirected = configuration.withResolvedPort(51432)
+                .withRedirect(Redirect.create("redirect.example.com", 51433));
+
+        assertThat(redirected.isIntegratedSecurity()).isTrue();
+        assertThat(redirected.getInstanceName()).isEmpty();
+        assertThat(redirected.isPortConfigured()).isTrue();
+        assertThat(redirected.getServicePrincipalName()).isEqualTo("MSSQLSvc/redirect.example.com:51433");
     }
 
     @Test
@@ -163,6 +190,35 @@ final class MssqlConnectionConfigurationUnitTests {
                 .build();
 
         assertThat(configuration.getServicePrincipalName()).isEqualTo("MSSQLSvc/sql.example.com:1444");
+    }
+
+    @Test
+    void namedInstanceDoesNotConfigureDefaultPortExplicitly() {
+        MssqlConnectionConfiguration configuration = MssqlConnectionConfiguration.builder()
+                .host("test-host")
+                .instanceName("SQLEXPRESS")
+                .password("test-password")
+                .username("test-username")
+                .build();
+
+        assertThat(configuration.getInstanceName()).contains("SQLEXPRESS");
+        assertThat(configuration.getPort()).isEqualTo(MssqlConnectionConfiguration.DEFAULT_PORT);
+        assertThat(configuration.isPortConfigured()).isFalse();
+    }
+
+    @Test
+    void explicitPortIsTrackedForNamedInstance() {
+        MssqlConnectionConfiguration configuration = MssqlConnectionConfiguration.builder()
+                .host("test-host")
+                .instanceName("SQLEXPRESS")
+                .port(1433)
+                .password("test-password")
+                .username("test-username")
+                .build();
+
+        assertThat(configuration.getInstanceName()).contains("SQLEXPRESS");
+        assertThat(configuration.getPort()).isEqualTo(1433);
+        assertThat(configuration.isPortConfigured()).isTrue();
     }
 
     @Test
@@ -206,6 +262,7 @@ final class MssqlConnectionConfigurationUnitTests {
                 .applicationName("r2dbc")
                 .database("test-database")
                 .host("test-host")
+                .instanceName("SQLEXPRESS")
                 .password("test-password")
                 .username("test-username")
                 .build();
@@ -216,8 +273,10 @@ final class MssqlConnectionConfigurationUnitTests {
                 .hasFieldOrPropertyWithValue("applicationName", "r2dbc")
                 .hasFieldOrPropertyWithValue("database", "test-database")
                 .hasFieldOrPropertyWithValue("host", "target")
+                .hasFieldOrPropertyWithValue("instanceName", null)
                 .hasFieldOrPropertyWithValue("password", "test-password")
                 .hasFieldOrPropertyWithValue("port", 1234)
+                .hasFieldOrPropertyWithValue("portConfigured", true)
                 .hasFieldOrPropertyWithValue("username", "test-username")
                 .hasFieldOrPropertyWithValue("integratedSecurity", false)
                 .hasFieldOrPropertyWithValue("sendStringParametersAsUnicode", true)

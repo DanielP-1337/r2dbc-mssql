@@ -89,6 +89,9 @@ public final class MssqlConnectionConfiguration {
 
     private final boolean integratedSecurity;
 
+    @Nullable
+    private final String instanceName;
+
     private final CharSequence password;
 
     private final Predicate<String> preferCursoredExecution;
@@ -97,6 +100,8 @@ public final class MssqlConnectionConfiguration {
     private final Duration lockWaitTimeout;
 
     private final int port;
+
+    private final boolean portConfigured;
 
     private final boolean sendStringParametersAsUnicode;
 
@@ -126,9 +131,9 @@ public final class MssqlConnectionConfiguration {
 
     private MssqlConnectionConfiguration(@Nullable String applicationName, @Nullable UUID connectionId, ConnectionProvider connectionProvider,
                                          Duration connectTimeout, @Nullable String database, String host, String hostNameInCertificate,
-                                         boolean integratedSecurity, @Nullable Duration lockWaitTimeout, @Nullable CharSequence password,
-                                         Predicate<String> preferCursoredExecution,
-                                         int port, boolean sendStringParametersAsUnicode, boolean ssl,
+                                         boolean integratedSecurity, @Nullable String instanceName, @Nullable Duration lockWaitTimeout,
+                                         @Nullable CharSequence password, Predicate<String> preferCursoredExecution,
+                                         int port, boolean portConfigured, boolean sendStringParametersAsUnicode, boolean ssl,
                                          Function<SslContextBuilder, SslContextBuilder> sslContextBuilderCustomizer,
                                          @Nullable Function<SslContextBuilder, SslContextBuilder> sslTunnelSslContextBuilderCustomizer,
                                          boolean tcpKeepAlive, boolean tcpNoDelay, boolean trustServerCertificate, @Nullable File trustStore,
@@ -142,10 +147,12 @@ public final class MssqlConnectionConfiguration {
         this.host = Assert.requireNonNull(host, "host must not be null");
         this.hostNameInCertificate = Assert.requireNonNull(hostNameInCertificate, "hostNameInCertificate must not be null");
         this.integratedSecurity = integratedSecurity;
+        this.instanceName = instanceName;
         this.lockWaitTimeout = lockWaitTimeout;
         this.password = integratedSecurity && password == null ? "" : Assert.requireNonNull(password, "password must not be null");
         this.preferCursoredExecution = Assert.requireNonNull(preferCursoredExecution, "preferCursoredExecution must not be null");
         this.port = port;
+        this.portConfigured = portConfigured;
         this.sendStringParametersAsUnicode = sendStringParametersAsUnicode;
         this.ssl = ssl;
         this.sslContextBuilderCustomizer = sslContextBuilderCustomizer;
@@ -192,13 +199,21 @@ public final class MssqlConnectionConfiguration {
         }
 
         return new MssqlConnectionConfiguration(this.applicationName, this.connectionId, this.connectionProvider, this.connectTimeout, this.database, redirectServerName, hostNameInCertificate,
-            this.integratedSecurity, this.lockWaitTimeout,
+            this.integratedSecurity, null, this.lockWaitTimeout,
             this.password,
-            this.preferCursoredExecution, redirect.getPort(), this.sendStringParametersAsUnicode, this.ssl, this.sslContextBuilderCustomizer,
+            this.preferCursoredExecution, redirect.getPort(), true, this.sendStringParametersAsUnicode, this.ssl, this.sslContextBuilderCustomizer,
             this.sslTunnelSslContextBuilderCustomizer, this.tcpKeepAlive, this.tcpNoDelay, this.trustServerCertificate, this.trustStore, this.trustStoreType, this.trustStorePassword, this.username
         );
     }
 
+    MssqlConnectionConfiguration withResolvedPort(int port) {
+        return new MssqlConnectionConfiguration(this.applicationName, this.connectionId, this.connectionProvider, this.connectTimeout, this.database, this.host, this.hostNameInCertificate,
+            this.integratedSecurity, this.instanceName, this.lockWaitTimeout,
+            this.password,
+            this.preferCursoredExecution, port, true, this.sendStringParametersAsUnicode, this.ssl, this.sslContextBuilderCustomizer,
+            this.sslTunnelSslContextBuilderCustomizer, this.tcpKeepAlive, this.tcpNoDelay, this.trustServerCertificate, this.trustStore, this.trustStoreType, this.trustStorePassword, this.username
+        );
+    }
     public ClientConfiguration toClientConfiguration() {
         return new DefaultClientConfiguration(this.connectionProvider, this.connectTimeout, this.host, this.hostNameInCertificate, this.port, this.ssl, this.sslContextBuilderCustomizer,
             this.sslTunnelSslContextBuilderCustomizer, this.tcpKeepAlive, this.tcpNoDelay, this.trustServerCertificate, this.trustStore, this.trustStoreType, this.trustStorePassword
@@ -220,10 +235,12 @@ public final class MssqlConnectionConfiguration {
         sb.append(", host=\"").append(this.host).append('\"');
         sb.append(", hostNameInCertificate=\"").append(this.hostNameInCertificate).append('\"');
         sb.append(", integratedSecurity=").append(this.integratedSecurity);
+        sb.append(", instanceName=\"").append(this.instanceName).append('\"');
         sb.append(", lockWaitTimeout=\"").append(this.lockWaitTimeout).append('\"');
         sb.append(", password=\"").append(repeat(this.password.length(), "*")).append('\"');
         sb.append(", preferCursoredExecution=\"").append(this.preferCursoredExecution).append('\"');
         sb.append(", port=").append(this.port);
+        sb.append(", portConfigured=").append(this.portConfigured);
         sb.append(", sendStringParametersAsUnicode=").append(this.sendStringParametersAsUnicode);
         sb.append(", ssl=").append(this.ssl);
         sb.append(", sslContextBuilderCustomizer=").append(this.sslContextBuilderCustomizer);
@@ -273,6 +290,10 @@ public final class MssqlConnectionConfiguration {
         return String.format("MSSQLSvc/%s:%d", this.host, this.port);
     }
 
+    Optional<String> getInstanceName() {
+        return Optional.ofNullable(this.instanceName);
+    }
+
     @Nullable
     Duration getLockWaitTimeout() {
         return this.lockWaitTimeout;
@@ -288,6 +309,10 @@ public final class MssqlConnectionConfiguration {
 
     int getPort() {
         return this.port;
+    }
+
+    boolean isPortConfigured() {
+        return this.portConfigured;
     }
 
     boolean isSendStringParametersAsUnicode() {
@@ -378,6 +403,9 @@ public final class MssqlConnectionConfiguration {
         private boolean integratedSecurity;
 
         @Nullable
+        private String instanceName;
+
+        @Nullable
         private Duration lockWaitTimeout;
 
         private Predicate<String> preferCursoredExecution = DefaultCursorPreference.INSTANCE;
@@ -385,6 +413,8 @@ public final class MssqlConnectionConfiguration {
         private CharSequence password;
 
         private int port = DEFAULT_PORT;
+
+        private boolean portConfigured;
 
         private boolean sendStringParametersAsUnicode = true;
 
@@ -559,6 +589,18 @@ public final class MssqlConnectionConfiguration {
             this.hostNameInCertificate = Assert.requireNonNull(hostNameInCertificate, "hostNameInCertificate must not be null");
             return this;
         }
+        /**
+         * Configure the SQL Server instance name.
+         *
+         * @param instanceName the SQL Server instance name
+         * @return this {@link Builder}
+         * @throws IllegalArgumentException if {@code instanceName} is {@code null}
+         * @since 1.1
+         */
+        public Builder instanceName(String instanceName) {
+            this.instanceName = Assert.requireNonNull(instanceName, "instanceName must not be null");
+            return this;
+        }
 
         /**
          * Configure the lock wait timeout via {@code SET LOCK_TIMEOUT}. {@link Duration#isNegative() Negative values} are translated to {@code -1} meaning infinite wait.
@@ -619,6 +661,7 @@ public final class MssqlConnectionConfiguration {
          */
         public Builder port(int port) {
             this.port = port;
+            this.portConfigured = true;
             return this;
         }
 
@@ -774,8 +817,8 @@ public final class MssqlConnectionConfiguration {
 
             return new MssqlConnectionConfiguration(this.applicationName, this.connectionId,
                 this.connectionProvider, this.connectTimeout, this.database, this.host, this.hostNameInCertificate,
-                this.integratedSecurity, this.lockWaitTimeout, this.password, this.preferCursoredExecution, this.port,
-                this.sendStringParametersAsUnicode, this.ssl, this.sslContextBuilderCustomizer,
+                this.integratedSecurity, this.instanceName, this.lockWaitTimeout, this.password, this.preferCursoredExecution, this.port,
+                this.portConfigured, this.sendStringParametersAsUnicode, this.ssl, this.sslContextBuilderCustomizer,
                 this.sslTunnelSslContextBuilderCustomizer, this.tcpKeepAlive, this.tcpNoDelay,
                 this.trustServerCertificate, this.trustStore, this.trustStoreType, this.trustStorePassword, this.username);
         }
