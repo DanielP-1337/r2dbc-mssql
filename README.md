@@ -196,6 +196,69 @@ $env:R2DBC_MSSQL_INTEGRATED_TRUST_SERVER_CERTIFICATE = "false"
 
 If `R2DBC_MSSQL_INTEGRATED_HOST` is not set, the integration test is skipped.
 
+#### Kerberos prerequisites and SPN troubleshooting
+
+Kerberos requires a matching service principal name (SPN) registered in Active
+Directory on the account representing the SQL Server service. Enabling
+`integratedSecurity=true` does not guarantee Kerberos: Windows `Negotiate` can
+select NTLM when Kerberos is unavailable and policy permits fallback.
+
+SQL Server attempts to register its SPNs at startup and unregister them at
+shutdown. Automatic registration requires the appropriate Active Directory
+permissions. If registration fails, an administrator must correct those
+permissions or register the required SPN manually. The driver and SQL Server
+Browser do not register SPNs.
+
+For this driver's TCP connections, the SPN is `MSSQLSvc/<host>:<port>`.
+Use the server FQDN as `host`. With `instanceName` and no explicit port, the driver
+uses the TCP port returned by SQL Server Browser when constructing the SPN.
+For example, `sql.example.com` on port `64190` requires
+`MSSQLSvc/sql.example.com:64190`; an entry ending in `:1433` or `:MYINSTANCE`
+does not match that TCP connection.
+
+| Configuration issue | Possible result | Action |
+| --- | --- | --- |
+| Required SPN is missing, or only an SPN for another port exists | NTLM fallback, or authentication failure when fallback is unavailable or prohibited | Register the SPN matching the connection hostname and actual TCP port. |
+| SPN is registered on the wrong account, or duplicated | Kerberos/SSPI authentication errors | Have an AD administrator resolve ownership and duplicates. |
+| Dynamic TCP port changes but the matching SPN is not registered | Discovery succeeds but Kerberos cannot authenticate the new endpoint | Restore automatic registration or update manually managed SPNs after port changes. |
+| SQL Server logs `0x2098` (`8344`, `ERROR_DS_INSUFF_ACCESS_RIGHTS`) during registration | Automatic registration lacks sufficient AD permissions | Review SPN permissions on the relevant AD object. |
+
+A domain service account owns its SQL Server SPNs. For a virtual service account
+such as `NT SERVICE\MSSQL$MYINSTANCE`, the network identity is the server's
+computer account, for example `EXAMPLE\SQLHOST$`.
+
+An administrator can query ownership and, if necessary, register the matching
+SPN with duplicate checking. The following PowerShell example assumes a virtual
+service account; replace the hostname, port, and computer account for your setup:
+
+```powershell
+setspn -Q "MSSQLSvc/sql.example.com:64190"
+setspn -S "MSSQLSvc/sql.example.com:64190" 'EXAMPLE\SQLHOST$'
+```
+
+Inspect registration messages on the affected SQL Server instance:
+
+```sql
+EXEC master.dbo.xp_readerrorlog 0, 1, N'Service Principal Name';
+```
+
+Verify the authentication scheme on the actual application connection from the
+remote client, rather than a separate SSMS connection:
+
+```sql
+SELECT SUSER_SNAME() AS login_name,
+       CAST(CONNECTIONPROPERTY('auth_scheme') AS varchar(40)) AS auth_scheme;
+```
+
+Expect `KERBEROS` when validating Kerberos; a successful login using `NTLM`
+does not establish that Kerberos works. TLS certificate validation is a separate
+requirement: `trustServerCertificate=true` does not resolve SPN problems.
+
+See Microsoft's documentation on
+[SPN registration](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/register-a-service-principal-name-for-kerberos-connections),
+[service accounts](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/configure-windows-service-accounts-and-permissions), and
+[misplaced SPNs](https://learn.microsoft.com/en-us/troubleshoot/sql/database-engine/connect/explicit-spn-is-misplaced).
+
 ### Named SQL Server Instances
 
 Named instances can use dynamic TCP ports. Configure the instance name with the
