@@ -28,6 +28,52 @@ Next steps:
 This project is governed by the [R2DBC Code of Conduct](https://github.com/r2dbc/.github/blob/main/CODE_OF_CONDUCT.adoc). By participating, you are expected to uphold this code of conduct. Please
 report unacceptable behavior to [info@r2dbc.io](mailto:info@r2dbc.io).
 
+## DanielP-1337 fork release
+
+This fork adds SQL Server named instance discovery and Windows Integrated Security.
+The current fork version is **1.1.0-danielp.2**, distributed through JitPack.
+This is an independently maintained fork release; it is not an upstream release.
+
+Use the following Maven configuration for this fork:
+
+```xml
+<repositories>
+  <repository>
+    <id>jitpack.io</id>
+    <url>https://jitpack.io</url>
+  </repository>
+</repositories>
+
+<dependencies>
+  <dependency>
+    <groupId>com.github.DanielP-1337</groupId>
+    <artifactId>r2dbc-mssql</artifactId>
+    <version>1.1.0-danielp.2</version>
+  </dependency>
+  <!-- Required when using Windows Integrated Security -->
+  <dependency>
+    <groupId>net.java.dev.jna</groupId>
+    <artifactId>jna-platform</artifactId>
+    <version>5.17.0</version>
+  </dependency>
+</dependencies>
+```
+
+Replace any direct upstream `io.r2dbc:r2dbc-mssql` dependency and exclude it
+where it is brought in transitively, so only one driver variant is loaded.
+
+For Gradle, add `maven { url = uri("https://jitpack.io") }` to your dependency
+repositories and use:
+
+```groovy
+implementation 'com.github.DanielP-1337:r2dbc-mssql:1.1.0-danielp.2'
+implementation 'net.java.dev.jna:jna-platform:5.17.0' // Windows Integrated Security
+```
+
+The GitHub release label and the version string are separate: this is published
+as a regular GitHub release, while the `-danielp.2` suffix is a prerelease
+identifier under strict Semantic Versioning. Pin the complete version string.
+
 ## Getting Started
 
 Here is a quick teaser of how to use R2DBC MSSQL in Java:
@@ -259,6 +305,87 @@ See Microsoft's documentation on
 [service accounts](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/configure-windows-service-accounts-and-permissions), and
 [misplaced SPNs](https://learn.microsoft.com/en-us/troubleshoot/sql/database-engine/connect/explicit-spn-is-misplaced).
 
+#### TLS certificate validation with Kerberos and named instances
+
+Use `ssl=true` and `trustServerCertificate=false` to enable TLS with certificate
+validation. Kerberos authentication and TLS server certificate validation are
+separate checks; a successful Kerberos login does not establish certificate trust.
+
+For a private CA, configure a Java truststore containing its public certificate.
+Importing the CA into Windows Trusted Root Certification Authorities does not
+necessarily make it trusted by Java. A separate PKCS12 truststore avoids changing
+the JDK-wide `cacerts` file.
+
+Example using the driver configuration directly (obtain `trustStorePassword`
+from your application's secret configuration as a `char[]`):
+
+```java
+MssqlConnectionConfiguration configuration = MssqlConnectionConfiguration.builder()
+    .host("sql.example.com")
+    .instanceName("MYINSTANCE")
+    .database("master")
+    .integratedSecurity()
+    .enableSsl()
+    .trustServerCertificate(false)
+    .trustStore("C:/MyLabTLS/mylab-sql-truststore.p12")
+    .trustStoreType("PKCS12")
+    .trustStorePassword(trustStorePassword)
+    .build();
+```
+
+Omit the explicit port to exercise SQL Server Browser discovery. The SQL Server
+instance must have TCP/IP enabled; its TCP port and Browser UDP port 1434 must
+be reachable. With Listen All enabled, configure the TCP settings under IPAll.
+Restart the instance after changing its TCP or certificate configuration.
+
+The server certificate must be valid at the client time and include the connection
+hostname in its DNS SAN. Its private key must be accessible to the SQL service.
+Use a SQL-compatible certificate with Server Authentication EKU and
+`AT_KEYEXCHANGE`; bind it to the correct instance. The instance name and TCP port
+are not DNS SAN values. Correct server/client clocks before issuing certificates:
+changing the clock afterward does not change an existing certificate's validity.
+
+| Symptom | Check |
+| --- | --- |
+| `PKIX path building failed` / no valid certification path | CA trust in the actual Java truststore, the served certificate, and the certificate chain. |
+| Certificate not yet valid or expired | Client/server UTC time and certificate validity; reissue certificates created with an incorrect clock. |
+| Hostname validation failure | Connection FQDN against certificate DNS SAN entries. |
+| TLS succeeds but authentication is NTLM | SPN ownership and the actual resolved TCP port, separately from certificate trust. |
+
+For JSSE default trust configuration, the integration test can receive
+`javax.net.ssl.trustStore`, `javax.net.ssl.trustStoreType=PKCS12`, and
+`javax.net.ssl.trustStorePassword` as Maven `-D` properties. Treat command lines
+and generated test reports as potentially containing the truststore password.
+
+A negative trust test must keep `ssl=true` and `trustServerCertificate=false`:
+with a truststore that lacks the issuing CA, the handshake should fail due to
+certificate trust. A timeout, SQL login error, or skipped test is not evidence
+that certificate validation works.
+
+See [SQL Server certificate requirements](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/certificate-requirements)
+and the [JSSE truststore documentation](https://docs.oracle.com/en/java/javase/18/security/java-secure-socket-extension-jsse-reference-guide.html).
+
+#### Recorded validation and scope
+
+Manual lab validation on September 11, 2026 used the `1.1.0-danielp.1` release
+checkout. The integration test was locally extended to accept a named-instance
+setting; that test-only extension is not part of this release's repository test.
+The production driver source is unchanged in `1.1.0-danielp.2`.
+
+| Check | Observed result |
+| --- | --- |
+| Prior release unit suite | 948 tests passed. |
+| Explicit TCP port with Windows Integrated Security | Expected domain identity and `KERBEROS` verified. |
+| Named instance with dynamic TCP port discovery | Expected domain identity and `KERBEROS` verified without an explicit port. |
+| Combined named instance + Kerberos + TLS with trusted private CA | One integration test passed with `trustServerCertificate=false`. |
+| Same TLS test without private CA trust in Java | Expected `SSLHandshakeException` / `PKIX path building failed`. |
+
+These results cover the tested lab configuration, not every SQL Server deployment.
+A dedicated wrong-hostname negative test and the complete database integration
+suite were not run. Local and JitPack release builds use `-DskipITs`; the live
+Windows tests are separate from those builds. The release workflow rebuilds and
+resolves the new JitPack version before publishing the regular GitHub release.
+
 ### Named SQL Server Instances
 
 Named instances can use dynamic TCP ports. Configure the instance name with the
@@ -297,7 +424,10 @@ connection.createStatement("INSERT INTO person (id, first_name, last_name) VALUE
 
 Binding also allows positional index (zero-based) references. The parameter index is derived from the parameter discovery order when parsing the query.
 
-### Maven configuration
+### Upstream Maven configuration
+
+The following coordinates are for upstream releases. For this fork, use the
+JitPack dependency shown above.
 
 Artifacts can be found on [Maven Central](https://central.sonatype.com/search?q=r2dbc-mssql).
 
