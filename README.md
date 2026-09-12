@@ -13,6 +13,7 @@ This driver provides the following features:
 * Windows Integrated Security using the credentials of the current Windows process
 * Full SSL encryption support (for e.g. Azure usage).
 * SQL Server named instance discovery through SQL Server Browser (SSRP)
+* Logical SQL Server name support for tunnel/proxy connections (LOGIN7 and TLS/SNI)
 * Transaction Control
 * Simple execution of SQL batches (direct and cursored execution)
 * Execution of parametrized statements (direct and cursored execution)
@@ -30,8 +31,9 @@ report unacceptable behavior to [info@r2dbc.io](mailto:info@r2dbc.io).
 
 ## DanielP-1337 fork release
 
-This fork adds SQL Server named instance discovery and Windows Integrated Security.
-The current fork version is **1.1.0-danielp.2**, distributed through JitPack.
+This fork adds SQL Server named instance discovery, Windows Integrated Security,
+and logical SQL Server name support for tunnel/proxy connections.
+The current fork version is **1.1.0-danielp.3**, distributed through JitPack.
 This is an independently maintained fork release; it is not an upstream release.
 
 Use the following Maven configuration for this fork:
@@ -48,7 +50,7 @@ Use the following Maven configuration for this fork:
   <dependency>
     <groupId>com.github.DanielP-1337</groupId>
     <artifactId>r2dbc-mssql</artifactId>
-    <version>1.1.0-danielp.2</version>
+    <version>1.1.0-danielp.3</version>
   </dependency>
   <!-- Required when using Windows Integrated Security -->
   <dependency>
@@ -66,12 +68,12 @@ For Gradle, add `maven { url = uri("https://jitpack.io") }` to your dependency
 repositories and use:
 
 ```groovy
-implementation 'com.github.DanielP-1337:r2dbc-mssql:1.1.0-danielp.2'
+implementation 'com.github.DanielP-1337:r2dbc-mssql:1.1.0-danielp.3'
 implementation 'net.java.dev.jna:jna-platform:5.17.0' // Windows Integrated Security
 ```
 
 The GitHub release label and the version string are separate: this is published
-as a regular GitHub release, while the `-danielp.2` suffix is a prerelease
+as a regular GitHub release, while the `-danielp.3` suffix is a prerelease
 identifier under strict Semantic Versioning. Pin the complete version string.
 
 ## Getting Started
