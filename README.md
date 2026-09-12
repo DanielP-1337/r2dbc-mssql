@@ -90,6 +90,13 @@ To discover the TCP port of a named SQL Server instance, specify `instanceName`
 and omit the port:
 `r2dbc:mssql://<host>/<database>?instanceName=SQLEXPRESS`.
 
+When connecting through a tunnel or proxy, `serverName` can specify the logical SQL Server name independently from the physical connection endpoint:
+
+```java
+ConnectionFactory connectionFactory = ConnectionFactories.get(
+    "r2dbc:mssql://localhost:15433/<database>?serverName=server.database.windows.net");
+```
+
 **Programmatic Connection Factory Discovery**
 
 ```java
@@ -102,6 +109,7 @@ ConnectionFactoryOptions options = builder()
     .option(PASSWORD, "…")
     .option(DATABASE, "…") // optional
     .option(SSL, true) // optional, defaults to false
+    .option(Option.valueOf("serverName"), "server.example.com") // optional, defaults to host
     .option(Option.valueOf("applicationName"), "…") // optional
     .option(Option.valueOf("preferCursoredExecution"), true/false) // optional
     .option(Option.valueOf("connectionId"), new UUID(…)) // optional
@@ -122,6 +130,7 @@ Mono<Connection> connectionMono = Mono.from(connectionFactory.create());
 | `ssl`                           | Whether to use transport-level encryption for the entire SQL server traffic.                                                                                                                                                                                              
 | `driver`                        | Must be `sqlserver`.                                                                                                                                                                                                                                                      
 | `host`                          | Server hostname to connect to.                                                                                                                                                                                                                                            
+| `serverName`                    | Logical SQL Server name used for LOGIN7 and TLS/SNI when it differs from the physical connection endpoint. Defaults to `host`. _(Optional)_
 | `port`                          | Server port to connect to. Defaults to `1433` when no named instance is configured. If both `port` and `instanceName` are specified, the explicit port takes precedence. _(Optional)_
 | `instanceName`                  | SQL Server named instance. If no explicit port is configured, the driver resolves the TCP port through SQL Server Browser using SSRP over UDP port `1434`. _(Optional)_
 | `integratedSecurity`            | Use Windows Integrated Security with the credentials of the current Windows process. When enabled, `username` and `password` are not required. Windows only. Defaults to `false`. _(Optional)_
@@ -151,6 +160,7 @@ Mono<Connection> connectionMono = Mono.from(connectionFactory.create());
 ```java
 MssqlConnectionConfiguration configuration = MssqlConnectionConfiguration.builder()
     .host("…")
+    .serverName("server.example.com") // optional, defaults to host
     .instanceName("SQLEXPRESS") // optional
     .username("…")
     .password("…")

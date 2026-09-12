@@ -222,6 +222,29 @@ final class MssqlConnectionConfigurationUnitTests {
     }
 
     @Test
+    void resolvedPortPreservesLogicalServerName() {
+
+        MssqlConnectionConfiguration configuration = MssqlConnectionConfiguration.builder()
+                .host("localhost")
+                .serverName("sql.example.com")
+                .instanceName("SQLEXPRESS")
+                .password("test-password")
+                .username("test-username")
+                .build();
+
+        MssqlConnectionConfiguration resolved = configuration.withResolvedPort(15433);
+
+        assertThat(resolved)
+                .hasFieldOrPropertyWithValue("host", "localhost")
+                .hasFieldOrPropertyWithValue("serverName", "sql.example.com")
+                .hasFieldOrPropertyWithValue("instanceName", "SQLEXPRESS")
+                .hasFieldOrPropertyWithValue("port", 15433)
+                .hasFieldOrPropertyWithValue("portConfigured", true);
+
+        assertThat(resolved.getLoginConfiguration())
+                .hasFieldOrPropertyWithValue("serverName", "sql.example.com");
+    }
+    @Test
     void constructorNoNoHost() {
         assertThatIllegalArgumentException().isThrownBy(() -> MssqlConnectionConfiguration.builder()
                         .password("test-password")
@@ -273,6 +296,7 @@ final class MssqlConnectionConfigurationUnitTests {
                 .hasFieldOrPropertyWithValue("applicationName", "r2dbc")
                 .hasFieldOrPropertyWithValue("database", "test-database")
                 .hasFieldOrPropertyWithValue("host", "target")
+                .hasFieldOrPropertyWithValue("serverName", "target")
                 .hasFieldOrPropertyWithValue("instanceName", null)
                 .hasFieldOrPropertyWithValue("password", "test-password")
                 .hasFieldOrPropertyWithValue("port", 1234)
@@ -317,6 +341,7 @@ final class MssqlConnectionConfigurationUnitTests {
                 .hasFieldOrPropertyWithValue("applicationName", "r2dbc")
                 .hasFieldOrPropertyWithValue("database", "test-database")
                 .hasFieldOrPropertyWithValue("host", "target.other.domain")
+                .hasFieldOrPropertyWithValue("serverName", "target.other.domain")
                 .hasFieldOrPropertyWithValue("password", "test-password")
                 .hasFieldOrPropertyWithValue("port", 1234)
                 .hasFieldOrPropertyWithValue("username", "test-username")
@@ -341,6 +366,7 @@ final class MssqlConnectionConfigurationUnitTests {
                 .hasFieldOrPropertyWithValue("applicationName", "r2dbc")
                 .hasFieldOrPropertyWithValue("database", "test-database")
                 .hasFieldOrPropertyWithValue("host", "worker.target.windows.net")
+                .hasFieldOrPropertyWithValue("serverName", "worker.target.windows.net")
                 .hasFieldOrPropertyWithValue("password", "test-password")
                 .hasFieldOrPropertyWithValue("port", 1234)
                 .hasFieldOrPropertyWithValue("username", "test-username")

@@ -85,6 +85,8 @@ public final class MssqlConnectionConfiguration {
 
     private final String host;
 
+    private final String serverName;
+
     private final String hostNameInCertificate;
 
     private final boolean integratedSecurity;
@@ -130,7 +132,7 @@ public final class MssqlConnectionConfiguration {
     private final String username;
 
     private MssqlConnectionConfiguration(@Nullable String applicationName, @Nullable UUID connectionId, ConnectionProvider connectionProvider,
-                                         Duration connectTimeout, @Nullable String database, String host, String hostNameInCertificate,
+                                         Duration connectTimeout, @Nullable String database, String host, String serverName, String hostNameInCertificate,
                                          boolean integratedSecurity, @Nullable String instanceName, @Nullable Duration lockWaitTimeout,
                                          @Nullable CharSequence password, Predicate<String> preferCursoredExecution,
                                          int port, boolean portConfigured, boolean sendStringParametersAsUnicode, boolean ssl,
@@ -145,6 +147,7 @@ public final class MssqlConnectionConfiguration {
         this.connectTimeout = Assert.requireNonNull(connectTimeout, "connect timeout must not be null");
         this.database = database;
         this.host = Assert.requireNonNull(host, "host must not be null");
+        this.serverName = Assert.requireNonNull(serverName, "serverName must not be null");
         this.hostNameInCertificate = Assert.requireNonNull(hostNameInCertificate, "hostNameInCertificate must not be null");
         this.integratedSecurity = integratedSecurity;
         this.instanceName = instanceName;
@@ -198,7 +201,7 @@ public final class MssqlConnectionConfiguration {
             }
         }
 
-        return new MssqlConnectionConfiguration(this.applicationName, this.connectionId, this.connectionProvider, this.connectTimeout, this.database, redirectServerName, hostNameInCertificate,
+        return new MssqlConnectionConfiguration(this.applicationName, this.connectionId, this.connectionProvider, this.connectTimeout, this.database, redirectServerName, redirectServerName, hostNameInCertificate,
             this.integratedSecurity, null, this.lockWaitTimeout,
             this.password,
             this.preferCursoredExecution, redirect.getPort(), true, this.sendStringParametersAsUnicode, this.ssl, this.sslContextBuilderCustomizer,
@@ -207,7 +210,7 @@ public final class MssqlConnectionConfiguration {
     }
 
     MssqlConnectionConfiguration withResolvedPort(int port) {
-        return new MssqlConnectionConfiguration(this.applicationName, this.connectionId, this.connectionProvider, this.connectTimeout, this.database, this.host, this.hostNameInCertificate,
+        return new MssqlConnectionConfiguration(this.applicationName, this.connectionId, this.connectionProvider, this.connectTimeout, this.database, this.host, this.serverName, this.hostNameInCertificate,
             this.integratedSecurity, this.instanceName, this.lockWaitTimeout,
             this.password,
             this.preferCursoredExecution, port, true, this.sendStringParametersAsUnicode, this.ssl, this.sslContextBuilderCustomizer,
@@ -215,7 +218,7 @@ public final class MssqlConnectionConfiguration {
         );
     }
     public ClientConfiguration toClientConfiguration() {
-        return new DefaultClientConfiguration(this.connectionProvider, this.connectTimeout, this.host, this.hostNameInCertificate, this.port, this.ssl, this.sslContextBuilderCustomizer,
+        return new DefaultClientConfiguration(this.connectionProvider, this.connectTimeout, this.host, this.serverName, this.hostNameInCertificate, this.port, this.ssl, this.sslContextBuilderCustomizer,
             this.sslTunnelSslContextBuilderCustomizer, this.tcpKeepAlive, this.tcpNoDelay, this.trustServerCertificate, this.trustStore, this.trustStoreType, this.trustStorePassword
         );
     }
@@ -233,6 +236,7 @@ public final class MssqlConnectionConfiguration {
         sb.append(", connectTimeout=\"").append(this.connectTimeout).append('\"');
         sb.append(", database=\"").append(this.database).append('\"');
         sb.append(", host=\"").append(this.host).append('\"');
+        sb.append(", serverName=\"").append(this.serverName).append('\"');
         sb.append(", hostNameInCertificate=\"").append(this.hostNameInCertificate).append('\"');
         sb.append(", integratedSecurity=").append(this.integratedSecurity);
         sb.append(", instanceName=\"").append(this.instanceName).append('\"');
@@ -276,6 +280,10 @@ public final class MssqlConnectionConfiguration {
 
     String getHost() {
         return this.host;
+    }
+
+    String getServerName() {
+        return this.serverName;
     }
 
     String getHostNameInCertificate() {
@@ -336,7 +344,7 @@ public final class MssqlConnectionConfiguration {
     }
 
     LoginConfiguration getLoginConfiguration() {
-        return new LoginConfiguration(getApplicationName(), this.connectionId, getDatabase().orElse(""), lookupHostName(), getPassword(), getHost(), useSsl(), getUsername()
+        return new LoginConfiguration(getApplicationName(), this.connectionId, getDatabase().orElse(""), lookupHostName(), getPassword(), getServerName(), useSsl(), getUsername()
         );
     }
 
@@ -397,6 +405,8 @@ public final class MssqlConnectionConfiguration {
         private String database;
 
         private String host;
+
+        private String serverName;
 
         private String hostNameInCertificate;
 
@@ -559,6 +569,18 @@ public final class MssqlConnectionConfiguration {
         }
 
         /**
+         * Configure the logical SQL Server name.
+         *
+         * @param serverName the logical server name
+         * @return this {@link Builder}
+         * @throws IllegalArgumentException if {@code serverName} is {@code null}
+         */
+        public Builder serverName(String serverName) {
+            this.serverName = Assert.requireNonNull(serverName, "serverName must not be null");
+            return this;
+        }
+
+        /**
          * Enable Windows Integrated Security using the credentials of the current Windows process.
          *
          * @return this {@link Builder}
@@ -579,7 +601,8 @@ public final class MssqlConnectionConfiguration {
         }
 
         /**
-         * Configure the expected hostname in the SSL certificate. Defaults to {@link #host(String)} if left unconfigured. Accepts wildcards such as {@code *.database.windows.net}.
+         * Configure the expected hostname in the SSL certificate. Defaults to {@link #serverName(String)} if configured, otherwise {@link #host(String)}. Accepts wildcards such as
+         * {@code *.database.windows.net}.
          *
          * @param hostNameInCertificate the hostNameInCertificate
          * @return this {@link Builder}
@@ -811,12 +834,16 @@ public final class MssqlConnectionConfiguration {
          */
         public MssqlConnectionConfiguration build() {
 
+            if (this.serverName == null) {
+                this.serverName = this.host;
+            }
+
             if (this.hostNameInCertificate == null) {
-                this.hostNameInCertificate = this.host;
+                this.hostNameInCertificate = this.serverName;
             }
 
             return new MssqlConnectionConfiguration(this.applicationName, this.connectionId,
-                this.connectionProvider, this.connectTimeout, this.database, this.host, this.hostNameInCertificate,
+                this.connectionProvider, this.connectTimeout, this.database, this.host, this.serverName, this.hostNameInCertificate,
                 this.integratedSecurity, this.instanceName, this.lockWaitTimeout, this.password, this.preferCursoredExecution, this.port,
                 this.portConfigured, this.sendStringParametersAsUnicode, this.ssl, this.sslContextBuilderCustomizer,
                 this.sslTunnelSslContextBuilderCustomizer, this.tcpKeepAlive, this.tcpNoDelay,
@@ -832,6 +859,8 @@ public final class MssqlConnectionConfiguration {
         private final Duration connectTimeout;
 
         private final String host;
+
+        private final String serverName;
 
         private final String hostNameInCertificate;
 
@@ -859,13 +888,14 @@ public final class MssqlConnectionConfiguration {
         @Nullable
         private final char[] trustStorePassword;
 
-        DefaultClientConfiguration(ConnectionProvider connectionProvider, Duration connectTimeout, String host, String hostNameInCertificate, int port, boolean ssl,
+        DefaultClientConfiguration(ConnectionProvider connectionProvider, Duration connectTimeout, String host, String serverName, String hostNameInCertificate, int port, boolean ssl,
                                    Function<SslContextBuilder, SslContextBuilder> sslContextBuilderCustomizer,
                                    @Nullable Function<SslContextBuilder, SslContextBuilder> sslTunnelSslContextBuilderCustomizer, boolean tcpKeepAlive, boolean tcpNoDelay,
                                    boolean trustServerCertificate, @Nullable File trustStore, @Nullable String trustStoreType, @Nullable char[] trustStorePassword) {
 
             this.connectTimeout = connectTimeout;
             this.host = host;
+            this.serverName = serverName;
             this.hostNameInCertificate = hostNameInCertificate;
             this.port = port;
             this.ssl = ssl;
@@ -883,6 +913,11 @@ public final class MssqlConnectionConfiguration {
         @Override
         public String getHost() {
             return this.host;
+        }
+
+        @Override
+        public String getServerName() {
+            return this.serverName;
         }
 
         @Override

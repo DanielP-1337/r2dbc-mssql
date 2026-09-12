@@ -64,6 +64,12 @@ public final class MssqlConnectionFactoryProvider implements ConnectionFactoryPr
      * Expected Hostname in SSL certificate. Supports wildcards.
      */
     public static final Option<String> HOSTNAME_IN_CERTIFICATE = Option.valueOf("hostNameInCertificate");
+
+    /**
+     * Logical SQL Server name used for authentication.
+     */
+    public static final Option<String> SERVER_NAME = Option.valueOf("serverName");
+
     /**
      * SQL Server named instance.
      *
@@ -177,6 +183,7 @@ public final class MssqlConnectionFactoryProvider implements ConnectionFactoryPr
         mapper.from(CONNECT_TIMEOUT).map(OptionMapper::toDuration).to(builder::connectTimeout);
         mapper.fromTyped(DATABASE).to(builder::database);
         mapper.fromTyped(HOSTNAME_IN_CERTIFICATE).to(builder::hostNameInCertificate);
+        mapper.fromTyped(SERVER_NAME).to(builder::serverName);
         mapper.fromTyped(INSTANCE_NAME).to(builder::instanceName);
         mapper.from(LOCK_WAIT_TIMEOUT).map(OptionMapper::toDuration).to(builder::lockWaitTimeout);
         mapper.from(PORT).map(OptionMapper::toInteger).to(builder::port);
