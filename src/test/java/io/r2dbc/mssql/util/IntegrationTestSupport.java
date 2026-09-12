@@ -27,6 +27,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import reactor.test.StepVerifier;
 
+import java.time.Duration;
 import java.util.function.Predicate;
 
 import static io.r2dbc.spi.ConnectionFactoryOptions.*;
@@ -69,7 +70,10 @@ public abstract class IntegrationTestSupport {
 
     @BeforeEach
     void setUp() {
-        connection.setAutoCommit(true).as(StepVerifier::create).verifyComplete();
+        connection.setStatementTimeout(Duration.ZERO)
+            .then(connection.setAutoCommit(true))
+            .as(StepVerifier::create)
+            .verifyComplete();
     }
 
     @AfterAll
