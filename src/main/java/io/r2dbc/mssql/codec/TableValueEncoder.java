@@ -54,8 +54,9 @@ final class TableValueEncoder {
             if (column.getType() != SqlServerType.BIT && column.getType() != SqlServerType.SMALLINT &&
                     column.getType() != SqlServerType.INTEGER && column.getType() != SqlServerType.BIGINT &&
                     column.getType() != SqlServerType.GUID && column.getType() != SqlServerType.DATE &&
-                    column.getType() != SqlServerType.NVARCHAR && !isDecimal(column.getType())) {
-                throw new IllegalArgumentException("Initial TVP support accepts only BIT, SMALLINT, INTEGER, BIGINT, GUID, DATE, NVARCHAR, DECIMAL and NUMERIC columns");
+                    column.getType() != SqlServerType.NVARCHAR && column.getType() != SqlServerType.VARBINARY &&
+                    !isDecimal(column.getType())) {
+                throw new IllegalArgumentException("Initial TVP support accepts only BIT, SMALLINT, INTEGER, BIGINT, GUID, DATE, NVARCHAR, VARBINARY, DECIMAL and NUMERIC columns");
             }
             if (isDecimal(column.getType())) {
                 if (column.getPrecision() < 1 || column.getPrecision() > 38) {
@@ -84,6 +85,14 @@ final class TableValueEncoder {
                     SqlServerType type = table.getColumns().get(i).getType();
                     if (isDecimal(type)) {
                         normalizeDecimal(cell, table.getColumns().get(i));
+                    }
+                    if (type == SqlServerType.VARBINARY) {
+                        if (!(cell instanceof byte[])) {
+                            throw new IllegalArgumentException("VARBINARY columns require byte[] or null cells");
+                        }
+                        if (((byte[]) cell).length > 8000) {
+                            throw new IllegalArgumentException("Initial VARBINARY support accepts at most 8000 bytes per cell");
+                        }
                     }
                     if (type == SqlServerType.NVARCHAR) {
                         if (!(cell instanceof String)) {
@@ -141,6 +150,9 @@ final class TableValueEncoder {
                     buffer.writeByte(decimalLength(column.getPrecision()));
                     buffer.writeByte(column.getPrecision());
                     buffer.writeByte(column.getScale());
+                } else if (type == SqlServerType.VARBINARY) {
+                    buffer.writeByte(0xa5); // BIGVARBINARY.
+                    buffer.writeShortLE(8000); // Default capacity in bytes; no collation.
                 } else if (type == SqlServerType.NVARCHAR) {
                     buffer.writeByte(0xe7); // NVARCHARTYPE.
                     buffer.writeShortLE(8000); // Default capacity: 4000 UTF-16 code units.
@@ -165,7 +177,15 @@ final class TableValueEncoder {
                 buffer.writeByte(1); // TVP_ROW.
                 for (int i = 0; i < row.size(); i++) {
                     Object cell = row.get(i);
-                    if (table.getColumns().get(i).getType() == SqlServerType.NVARCHAR) {
+                    if (table.getColumns().get(i).getType() == SqlServerType.VARBINARY) {
+                        if (cell == null) {
+                            buffer.writeShortLE(0xffff);
+                        } else {
+                            byte[] value = (byte[]) cell;
+                            buffer.writeShortLE(value.length);
+                            buffer.writeBytes(value);
+                        }
+                    } else if (table.getColumns().get(i).getType() == SqlServerType.NVARCHAR) {
                         if (cell == null) {
                             buffer.writeShortLE(0xffff);
                         } else {

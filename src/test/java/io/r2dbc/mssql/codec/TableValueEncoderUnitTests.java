@@ -506,6 +506,73 @@ class TableValueEncoderUnitTests {
         }).isInstanceOf(IllegalArgumentException.class).hasMessage(expectedMessage);
     }
 
+    @Test
+    void shouldEncodeVarbinaryBytesEmptyAndNull() {
+
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("value", SqlServerType.VARBINARY)
+                .row(new byte[]{0x00, 0x01, 0x7f, (byte) 0x80, (byte) 0xff, 0x00})
+                .row(new byte[0])
+                .row((Object) null)
+                .build();
+
+        // BIGVARBINARY (0xa5): maximum length 8000, without collation metadata.
+        // Preserve all bytes, including high bits and leading/trailing zeroes.
+        // Empty values use a zero USHORT length; NULL uses 0xffff.
+        assertWire(table, TYPE_NAME + "01 00 " +
+                "00 00 00 00 01 00 a5 40 1f 00 " +
+                "00 " +
+                "01 06 00 00 01 7f 80 ff 00 " +
+                "01 00 00 " +
+                "01 ff ff " +
+                "00");
+    }
+
+    @Test
+    void shouldEncodeEmptyVarbinaryTable() {
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("value", SqlServerType.VARBINARY).build();
+        assertWire(table, TYPE_NAME + "01 00 00 00 00 00 00 00 a5 40 1f 00 00 00");
+    }
+
+    @Test
+    void shouldEncodeAllNullVarbinaryColumn() {
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("value", SqlServerType.VARBINARY).row((Object) null).build();
+        assertWire(table, TYPE_NAME + "01 00 00 00 00 00 01 00 a5 40 1f 00 00 01 ff ff 00");
+    }
+
+    @Test
+    void shouldEncodeVarbinaryAt8000Bytes() {
+        byte[] value = new byte[8000];
+        java.util.Arrays.fill(value, (byte) 0xa5);
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("value", SqlServerType.VARBINARY).row(value).build();
+        assertWire(table, TYPE_NAME + "01 00 00 00 00 00 00 00 a5 40 1f 00 00 01 40 1f " +
+                String.join("", java.util.Collections.nCopies(8000, "a5 ")) + "00");
+    }
+
+    @Test
+    void shouldRejectVarbinaryAbove8000Bytes() {
+        assertVarbinaryRejected(new byte[8001], "Initial VARBINARY support accepts at most 8000 bytes per cell");
+    }
+
+    @Test
+    void shouldRejectIncompatibleVarbinaryValues() {
+        for (Object value : new Object[]{"0x01", new Byte[]{1}, java.nio.ByteBuffer.wrap(new byte[]{1})}) {
+            assertVarbinaryRejected(value, "VARBINARY columns require byte[] or null cells");
+        }
+    }
+
+    private static void assertVarbinaryRejected(Object value, String expectedMessage) {
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("value", SqlServerType.VARBINARY).row(value).build();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> {
+            Encoded encoded = new DefaultCodecs().encode(TestByteBufAllocator.TEST, RpcParameterContext.in(), table);
+            encoded.dispose();
+        }).isInstanceOf(IllegalArgumentException.class).hasMessage(expectedMessage);
+    }
+
     private static MssqlTableValue.Builder integerTable() {
         return MssqlTableValue.builder("dbo.t").column("value", SqlServerType.INTEGER);
     }
