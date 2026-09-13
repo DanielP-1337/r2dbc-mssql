@@ -51,6 +51,9 @@ final class TableValueEncoder {
         }
         Collation collation = null;
         for (MssqlTableValue.Column column : table.getColumns()) {
+            if (column.isMax() && column.getType() != SqlServerType.NVARCHAR) {
+                throw new IllegalArgumentException("Initial MAX support accepts only NVARCHAR columns");
+            }
             if (column.getType() != SqlServerType.BIT && column.getType() != SqlServerType.SMALLINT &&
                     column.getType() != SqlServerType.INTEGER && column.getType() != SqlServerType.BIGINT &&
                     column.getType() != SqlServerType.GUID && column.getType() != SqlServerType.DATE &&
@@ -98,7 +101,7 @@ final class TableValueEncoder {
                         if (!(cell instanceof String)) {
                             throw new IllegalArgumentException("NVARCHAR columns require String or null cells");
                         }
-                        if (((String) cell).length() > 4000) {
+                        if (!table.getColumns().get(i).isMax() && ((String) cell).length() > 4000) {
                             throw new IllegalArgumentException("Initial NVARCHAR support accepts at most 4000 UTF-16 code units per cell");
                         }
                     }
@@ -155,7 +158,7 @@ final class TableValueEncoder {
                     buffer.writeShortLE(8000); // Default capacity in bytes; no collation.
                 } else if (type == SqlServerType.NVARCHAR) {
                     buffer.writeByte(0xe7); // NVARCHARTYPE.
-                    buffer.writeShortLE(8000); // Default capacity: 4000 UTF-16 code units.
+                    buffer.writeShortLE(table.getColumns().get(i).isMax() ? 0xffff : 8000);
                     collation.encode(buffer);
                 } else if (type == SqlServerType.DATE) {
                     buffer.writeByte(0x28); // DATENTYPE has no length in TYPE_INFO.
@@ -186,7 +189,9 @@ final class TableValueEncoder {
                             buffer.writeBytes(value);
                         }
                     } else if (table.getColumns().get(i).getType() == SqlServerType.NVARCHAR) {
-                        if (cell == null) {
+                        if (table.getColumns().get(i).isMax()) {
+                            writeNvarcharMax(buffer, (String) cell);
+                        } else if (cell == null) {
                             buffer.writeShortLE(0xffff);
                         } else {
                             String value = (String) cell;
@@ -251,6 +256,23 @@ final class TableValueEncoder {
             buffer.release();
             throw e;
         }
+    }
+
+    private static void writeNvarcharMax(ByteBuf buffer, String value) {
+        if (value == null) {
+            buffer.writeLongLE(-1L); // PLP_NULL has no chunk or terminator.
+            return;
+        }
+
+        // Use the encoded byte count for both PLP lengths, including surrogate pairs.
+        // This initial MAX implementation still buffers the complete cell and TVP.
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_16LE);
+        buffer.writeLongLE(bytes.length);
+        if (bytes.length != 0) {
+            buffer.writeIntLE(bytes.length);
+            buffer.writeBytes(bytes);
+        }
+        buffer.writeIntLE(0); // PLP_TERMINATOR, also required for an empty value.
     }
 
     private static boolean isDecimal(SqlServerType type) {

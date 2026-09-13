@@ -573,6 +573,86 @@ class TableValueEncoderUnitTests {
         }).isInstanceOf(IllegalArgumentException.class).hasMessage(expectedMessage);
     }
 
+    @Test
+    void shouldEncodeExplicitNvarcharMaxUnicodeEmptyAndNull() {
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .columnMax("value", SqlServerType.NVARCHAR)
+                .row("A\ud83d\ude0a").row("").row((Object) null).build();
+
+        // MAX metadata uses 0xffff. Each non-null PLP value has an eight-byte
+        // total byte length, length-prefixed chunks, and a four-byte zero terminator.
+        // Empty has total length zero and only the terminator; NULL is eight 0xff bytes.
+        assertWire(table, nvarcharContext(), TYPE_NAME + "01 00 " +
+                "00 00 00 00 01 00 e7 ff ff 09 04 00 00 00 00 00 " +
+                "01 06 00 00 00 00 00 00 00 06 00 00 00 41 00 3d d8 0a de 00 00 00 00 " +
+                "01 00 00 00 00 00 00 00 00 00 00 00 00 " +
+                "01 ff ff ff ff ff ff ff ff 00");
+    }
+
+    @Test
+    void shouldEncodeNvarcharMaxAbove4000CodeUnits() {
+        String value = String.join("", java.util.Collections.nCopies(4001, "x"));
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .columnMax("value", SqlServerType.NVARCHAR).row(value).build();
+
+        // 4001 UTF-16 code units = 8002 bytes (0x1f42), emitted as one buffered chunk.
+        assertWire(table, nvarcharContext(), TYPE_NAME + "01 00 " +
+                "00 00 00 00 00 00 e7 ff ff 09 04 00 00 00 00 00 " +
+                "01 42 1f 00 00 00 00 00 00 42 1f 00 00 " +
+                String.join("", java.util.Collections.nCopies(4001, "78 00 ")) +
+                "00 00 00 00 00");
+    }
+
+    @Test
+    void shouldEncodeEmptyNvarcharMaxTable() {
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .columnMax("value", SqlServerType.NVARCHAR).build();
+        assertWire(table, nvarcharContext(), TYPE_NAME + "01 00 " +
+                "00 00 00 00 00 00 e7 ff ff 09 04 00 00 00 00 00 00");
+    }
+
+    @Test
+    void shouldEncodeAllNullNvarcharMaxColumn() {
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .columnMax("value", SqlServerType.NVARCHAR).row((Object) null).build();
+        assertWire(table, nvarcharContext(), TYPE_NAME + "01 00 " +
+                "00 00 00 00 01 00 e7 ff ff 09 04 00 00 00 00 00 " +
+                "01 ff ff ff ff ff ff ff ff 00");
+    }
+
+    @Test
+    void shouldEncodeNvarcharMaxWithPlpLengthAboveUnsignedShort() {
+        String value = String.join("", java.util.Collections.nCopies(32768, "x")) + "\ud83d\ude0a";
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .columnMax("value", SqlServerType.NVARCHAR).row(value).build();
+        // 65540 bytes (0x00010004) must not be truncated to a 16-bit length.
+        assertWire(table, nvarcharContext(), TYPE_NAME + "01 00 " +
+                "00 00 00 00 00 00 e7 ff ff 09 04 00 00 00 00 00 " +
+                "01 04 00 01 00 00 00 00 00 04 00 01 00 " +
+                String.join("", java.util.Collections.nCopies(32768, "78 00 ")) +
+                "3d d8 0a de 00 00 00 00 00");
+    }
+
+    @Test
+    void shouldRejectMaxOnIntegerColumnEvenWithoutRows() {
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .columnMax("value", SqlServerType.INTEGER).build();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> {
+            Encoded encoded = new DefaultCodecs().encode(TestByteBufAllocator.TEST, RpcParameterContext.in(), table);
+            encoded.dispose();
+        }).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("MAX");
+    }
+
+    @Test
+    void shouldRejectIntegerInNvarcharMaxColumn() {
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .columnMax("value", SqlServerType.NVARCHAR).row(42).build();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> {
+            Encoded encoded = new DefaultCodecs().encode(TestByteBufAllocator.TEST, nvarcharContext(), table);
+            encoded.dispose();
+        }).isInstanceOf(IllegalArgumentException.class).hasMessage("NVARCHAR columns require String or null cells");
+    }
+
     private static MssqlTableValue.Builder integerTable() {
         return MssqlTableValue.builder("dbo.t").column("value", SqlServerType.INTEGER);
     }

@@ -75,15 +75,22 @@ public final class MssqlTableValue {
 
         private final int scale;
 
+        private final boolean max;
+
         private Column(String name, SqlServerType type) {
             this(name, type, 0, 0);
         }
 
         private Column(String name, SqlServerType type, int precision, int scale) {
+            this(name, type, precision, scale, false);
+        }
+
+        private Column(String name, SqlServerType type, int precision, int scale, boolean max) {
             this.name = name;
             this.type = type;
             this.precision = precision;
             this.scale = scale;
+            this.max = max;
         }
 
         public String getName() {
@@ -106,6 +113,13 @@ public final class MssqlTableValue {
          */
         public int getScale() {
             return this.scale;
+        }
+
+        /**
+         * @return whether this column explicitly uses the SQL MAX length
+         */
+        public boolean isMax() {
+            return this.max;
         }
     }
 
@@ -133,6 +147,18 @@ public final class MssqlTableValue {
          */
         public Builder column(String name, SqlServerType type) {
             this.columns.add(new Column(name, type));
+            return this;
+        }
+
+        /**
+         * Append an NVARCHAR(MAX) or VARBINARY(MAX) column.
+         *
+         * @param name the column name
+         * @param type NVARCHAR or VARBINARY
+         * @return this builder
+         */
+        public Builder columnMax(String name, SqlServerType type) {
+            this.columns.add(new Column(name, type, 0, 0, true));
             return this;
         }
 
