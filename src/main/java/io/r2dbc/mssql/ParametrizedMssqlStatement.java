@@ -330,6 +330,13 @@ final class ParametrizedMssqlStatement extends MssqlStatementSupport implements 
     }
 
     private static boolean isTextual(@Nullable Object value) {
+        if (value instanceof MssqlTableValue) {
+            for (MssqlTableValue.Column column : ((MssqlTableValue) value).getColumns()) {
+                if (column.getType() == io.r2dbc.mssql.message.type.SqlServerType.NVARCHAR) {
+                    return true;
+                }
+            }
+        }
         return value instanceof CharSequence || value instanceof Clob;
     }
 

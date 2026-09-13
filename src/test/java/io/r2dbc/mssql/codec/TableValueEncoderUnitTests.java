@@ -260,14 +260,111 @@ class TableValueEncoderUnitTests {
                 .hasMessage(expectedMessage);
     }
 
+    @Test
+    void shouldEncodeNvarcharUnicodeEmptyAndNull() {
+
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("value", SqlServerType.NVARCHAR)
+                .row("A\u00e4\u6f22\ud83d\ude0a")
+                .row("")
+                .row((Object) null)
+                .build();
+
+        RpcParameterContext context = RpcParameterContext.in(
+                new RpcParameterContext.CharacterValueContext(
+                        io.r2dbc.mssql.message.type.Collation.from(13632521, 52), false));
+
+        // Explicit NVARCHAR stays Unicode even when sendStringParametersAsUnicode is false.
+        // Default capacity: 4000 UTF-16 code units (8000 bytes). The emoji uses two units.
+        // Empty strings use a zero USHORT length; NULL uses 0xffff.
+        assertWire(table, context, TYPE_NAME + "01 00 " +
+                "00 00 00 00 01 00 e7 40 1f 09 04 d0 00 34 00 " +
+                "00 " +
+                "01 0a 00 41 00 e4 00 22 6f 3d d8 0a de " +
+                "01 00 00 " +
+                "01 ff ff " +
+                "00");
+    }
+
+    @Test
+    void shouldEncodeEmptyNvarcharTableWithDifferentCollation() {
+
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("value", SqlServerType.NVARCHAR).build();
+
+        assertWire(table, nvarcharContext(), TYPE_NAME + "01 00 " +
+                "00 00 00 00 00 00 e7 40 1f 09 04 00 00 00 00 " +
+                "00 00");
+    }
+
+    @Test
+    void shouldEncodeAllNullNvarcharColumnWithDifferentCollation() {
+
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("value", SqlServerType.NVARCHAR).row((Object) null).build();
+
+        assertWire(table, nvarcharContext(), TYPE_NAME + "01 00 " +
+                "00 00 00 00 01 00 e7 40 1f 09 04 00 00 00 00 " +
+                "00 01 ff ff 00");
+    }
+
+    @Test
+    void shouldEncodeNvarcharAt4000Utf16CodeUnits() {
+
+        // 3998 BMP characters plus one surrogate pair: exactly 4000 code units.
+        String value = String.join("", java.util.Collections.nCopies(3998, "x")) + "\ud83d\ude0a";
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("value", SqlServerType.NVARCHAR).row(value).build();
+
+        assertWire(table, nvarcharContext(), TYPE_NAME + "01 00 " +
+                "00 00 00 00 00 00 e7 40 1f 09 04 00 00 00 00 " +
+                "00 01 40 1f " +
+                String.join("", java.util.Collections.nCopies(3998, "78 00 ")) +
+                "3d d8 0a de 00");
+    }
+
+    @Test
+    void shouldRejectNvarcharAbove4000Utf16CodeUnits() {
+
+        String value = String.join("", java.util.Collections.nCopies(3999, "x")) + "\ud83d\ude0a";
+        assertNvarcharRejected(value,
+                "Initial NVARCHAR support accepts at most 4000 UTF-16 code units per cell");
+    }
+
+    @Test
+    void shouldRejectIntegerInNvarcharColumn() {
+        assertNvarcharRejected(42, "NVARCHAR columns require String or null cells");
+    }
+
+    private static RpcParameterContext nvarcharContext() {
+        return RpcParameterContext.in(new RpcParameterContext.CharacterValueContext(
+                io.r2dbc.mssql.message.type.Collation.from(1033, 0), true));
+    }
+
+    private static void assertNvarcharRejected(Object value, String expectedMessage) {
+
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("value", SqlServerType.NVARCHAR).row(value).build();
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> {
+            Encoded encoded = new DefaultCodecs().encode(TestByteBufAllocator.TEST, nvarcharContext(), table);
+            encoded.dispose();
+        }).isInstanceOf(IllegalArgumentException.class).hasMessage(expectedMessage);
+    }
+
     private static MssqlTableValue.Builder integerTable() {
         return MssqlTableValue.builder("dbo.t").column("value", SqlServerType.INTEGER);
     }
 
     private static void assertWire(MssqlTableValue table, String expectedPayload) {
 
+        assertWire(table, RpcParameterContext.in(), expectedPayload);
+    }
+
+    private static void assertWire(MssqlTableValue table, RpcParameterContext context, String expectedPayload) {
+
         Encoded encoded = new DefaultCodecs().encode(
-                TestByteBufAllocator.TEST, RpcParameterContext.in(), table);
+                TestByteBufAllocator.TEST, context, table);
         try {
             assertThat(encoded.getFormalType()).isEqualTo("[dbo].[t] READONLY");
             ByteBuf wire = TestByteBufAllocator.TEST.buffer();

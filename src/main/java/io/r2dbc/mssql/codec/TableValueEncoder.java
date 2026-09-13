@@ -19,6 +19,7 @@ package io.r2dbc.mssql.codec;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.r2dbc.mssql.MssqlTableValue;
+import io.r2dbc.mssql.message.type.Collation;
 import io.r2dbc.mssql.message.type.SqlServerType;
 import io.r2dbc.mssql.message.type.TdsDataType;
 
@@ -26,7 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
- * Initial input TVP encoder for BIT, SMALLINT, INTEGER, BIGINT, GUID and DATE columns, including NULL cells.
+ * Initial input TVP encoder for BIT, SMALLINT, INTEGER, BIGINT, GUID, DATE and NVARCHAR columns, including NULL cells.
  * Uses MS-TDS 2.2.5.5.5 metadata and row tokens.
  * This first implementation buffers the complete value; it is not streaming.
  */
@@ -35,7 +36,7 @@ final class TableValueEncoder {
     private TableValueEncoder() {
     }
 
-    static Encoded encode(ByteBufAllocator allocator, MssqlTableValue table) {
+    static Encoded encode(ByteBufAllocator allocator, RpcParameterContext context, MssqlTableValue table) {
 
         String typeName = table.getTypeName();
         if (typeName == null || !typeName.matches("[A-Za-z_][A-Za-z0-9_]{0,127}\\.[A-Za-z_][A-Za-z0-9_]{0,127}")) {
@@ -46,11 +47,16 @@ final class TableValueEncoder {
         if (table.getColumns().isEmpty() || table.getColumns().size() > 1024) {
             throw new IllegalArgumentException("TVP requires between 1 and 1024 columns");
         }
+        Collation collation = null;
         for (MssqlTableValue.Column column : table.getColumns()) {
             if (column.getType() != SqlServerType.BIT && column.getType() != SqlServerType.SMALLINT &&
                     column.getType() != SqlServerType.INTEGER && column.getType() != SqlServerType.BIGINT &&
-                    column.getType() != SqlServerType.GUID && column.getType() != SqlServerType.DATE) {
-                throw new IllegalArgumentException("Initial TVP support accepts only BIT, SMALLINT, INTEGER, BIGINT, GUID and DATE columns");
+                    column.getType() != SqlServerType.GUID && column.getType() != SqlServerType.DATE &&
+                    column.getType() != SqlServerType.NVARCHAR) {
+                throw new IllegalArgumentException("Initial TVP support accepts only BIT, SMALLINT, INTEGER, BIGINT, GUID, DATE and NVARCHAR columns");
+            }
+            if (column.getType() == SqlServerType.NVARCHAR) {
+                collation = context.getRequiredValueContext(RpcParameterContext.CharacterValueContext.class).getCollation();
             }
         }
         boolean[] nullable = new boolean[table.getColumns().size()];
@@ -64,6 +70,14 @@ final class TableValueEncoder {
                     nullable[i] = true;
                 } else {
                     SqlServerType type = table.getColumns().get(i).getType();
+                    if (type == SqlServerType.NVARCHAR) {
+                        if (!(cell instanceof String)) {
+                            throw new IllegalArgumentException("NVARCHAR columns require String or null cells");
+                        }
+                        if (((String) cell).length() > 4000) {
+                            throw new IllegalArgumentException("Initial NVARCHAR support accepts at most 4000 UTF-16 code units per cell");
+                        }
+                    }
                     if (type == SqlServerType.DATE) {
                         if (!(cell instanceof java.time.LocalDate)) {
                             throw new IllegalArgumentException("DATE columns require LocalDate or null cells");
@@ -106,7 +120,11 @@ final class TableValueEncoder {
                 // SQL Server still enforces the declared table type constraints.
                 buffer.writeShortLE(nullable[i] ? 1 : 0); // fNullable.
                 SqlServerType type = table.getColumns().get(i).getType();
-                if (type == SqlServerType.DATE) {
+                if (type == SqlServerType.NVARCHAR) {
+                    buffer.writeByte(0xe7); // NVARCHARTYPE.
+                    buffer.writeShortLE(8000); // Default capacity: 4000 UTF-16 code units.
+                    collation.encode(buffer);
+                } else if (type == SqlServerType.DATE) {
                     buffer.writeByte(0x28); // DATENTYPE has no length in TYPE_INFO.
                 } else if (type == SqlServerType.GUID) {
                     buffer.writeByte(0x24); // GUIDTYPE.
@@ -126,7 +144,15 @@ final class TableValueEncoder {
                 buffer.writeByte(1); // TVP_ROW.
                 for (int i = 0; i < row.size(); i++) {
                     Object cell = row.get(i);
-                    if (cell == null) {
+                    if (table.getColumns().get(i).getType() == SqlServerType.NVARCHAR) {
+                        if (cell == null) {
+                            buffer.writeShortLE(0xffff);
+                        } else {
+                            String value = (String) cell;
+                            buffer.writeShortLE(value.length() * 2);
+                            buffer.writeCharSequence(value, StandardCharsets.UTF_16LE);
+                        }
+                    } else if (cell == null) {
                         buffer.writeByte(0); // NULL: zero length, no value bytes.
                     } else if (table.getColumns().get(i).getType() == SqlServerType.DATE) {
                         java.time.LocalDate date = (java.time.LocalDate) cell;
