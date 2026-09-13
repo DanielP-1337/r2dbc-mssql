@@ -71,9 +71,19 @@ public final class MssqlTableValue {
 
         private final SqlServerType type;
 
+        private final int precision;
+
+        private final int scale;
+
         private Column(String name, SqlServerType type) {
+            this(name, type, 0, 0);
+        }
+
+        private Column(String name, SqlServerType type, int precision, int scale) {
             this.name = name;
             this.type = type;
+            this.precision = precision;
+            this.scale = scale;
         }
 
         public String getName() {
@@ -82,6 +92,20 @@ public final class MssqlTableValue {
 
         public SqlServerType getType() {
             return this.type;
+        }
+
+        /**
+         * @return the declared decimal precision, or zero when unspecified
+         */
+        public int getPrecision() {
+            return this.precision;
+        }
+
+        /**
+         * @return the declared decimal scale, or zero when unspecified
+         */
+        public int getScale() {
+            return this.scale;
         }
     }
 
@@ -109,6 +133,20 @@ public final class MssqlTableValue {
          */
         public Builder column(String name, SqlServerType type) {
             this.columns.add(new Column(name, type));
+            return this;
+        }
+
+        /**
+         * Append a DECIMAL or NUMERIC column with explicit precision and scale.
+         *
+         * @param name the column name
+         * @param type DECIMAL or NUMERIC
+         * @param precision the total number of digits (1 through 38)
+         * @param scale the fractional digits (0 through precision)
+         * @return this builder
+         */
+        public Builder column(String name, SqlServerType type, int precision, int scale) {
+            this.columns.add(new Column(name, type, precision, scale));
             return this;
         }
 

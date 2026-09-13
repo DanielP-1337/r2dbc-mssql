@@ -352,6 +352,160 @@ class TableValueEncoderUnitTests {
         }).isInstanceOf(IllegalArgumentException.class).hasMessage(expectedMessage);
     }
 
+    @Test
+    void shouldEncodeDecimalSignsScaleZeroAndNull() {
+        assertDecimalWire(SqlServerType.DECIMAL, "6a");
+    }
+
+    @Test
+    void shouldEncodeNumericSignsScaleZeroAndNull() {
+        assertDecimalWire(SqlServerType.NUMERIC, "6c");
+    }
+
+    private static void assertDecimalWire(SqlServerType type, String typeToken) {
+
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("amount", type, 9, 2)
+                .row(new java.math.BigDecimal("123.45"))
+                .row(new java.math.BigDecimal("-123.45"))
+                .row(new java.math.BigDecimal("1.2"))
+                .row(java.math.BigDecimal.ZERO)
+                .row((Object) null)
+                .build();
+
+        // Precision 9: five bytes per non-null value (sign plus four-byte magnitude).
+        // Every row shares scale 2. Magnitudes 12345 and 120 are 0x3039 and 0x78.
+        // Positive/zero sign = 1; negative sign = 0. NULL has a zero length byte.
+        assertWire(table, TYPE_NAME + "01 00 " +
+                "00 00 00 00 01 00 " + typeToken + " 05 09 02 00 " +
+                "00 " +
+                "01 05 01 39 30 00 00 " +
+                "01 05 00 39 30 00 00 " +
+                "01 05 01 78 00 00 00 " +
+                "01 05 01 00 00 00 00 " +
+                "01 00 " +
+                "00");
+    }
+
+    @Test
+    void shouldEncodeDecimalPrecisionBoundaries() {
+
+        // Independently calculated unsigned little-endian representations of 10^precision - 1.
+        String[][] fixtures = {
+                {"1", "01", "05", "9", "09 00 00 00"},
+                {"9", "09", "05", "999999999", "ff c9 9a 3b"},
+                {"10", "0a", "09", "9999999999", "ff e3 0b 54 02 00 00 00"},
+                {"19", "13", "09", "9999999999999999999", "ff ff e7 89 04 23 c7 8a"},
+                {"20", "14", "0d", "99999999999999999999", "ff ff 0f 63 2d 5e c7 6b 05 00 00 00"},
+                {"28", "1c", "0d", "9999999999999999999999999999", "ff ff ff 0f 61 02 25 3e 5e ce 4f 20"},
+                {"29", "1d", "11", "99999999999999999999999999999", "ff ff ff 9f ca 17 72 6d ae 0f 1e 43 01 00 00 00"},
+                {"38", "26", "11", "99999999999999999999999999999999999999", "ff ff ff ff 3f 22 8a 09 7a c4 86 5a a8 4c 3b 4b"}
+        };
+        for (SqlServerType type : new SqlServerType[]{SqlServerType.DECIMAL, SqlServerType.NUMERIC}) {
+            for (String[] fixture : fixtures) {
+                int precision = Integer.parseInt(fixture[0]);
+                java.math.BigDecimal maximum = new java.math.BigDecimal(fixture[3]);
+                MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                        .column("amount", type, precision, 0)
+                        .row(maximum).row(maximum.negate()).row((Object) null).build();
+                String token = type == SqlServerType.DECIMAL ? "6a" : "6c";
+                assertWire(table, TYPE_NAME + "01 00 00 00 00 00 01 00 " + token + " " +
+                        fixture[2] + " " + fixture[1] + " 00 00 00 " +
+                        "01 " + fixture[2] + " 01 " + fixture[4] + " " +
+                        "01 " + fixture[2] + " 00 " + fixture[4] + " 01 00 00");
+            }
+        }
+    }
+
+    @Test
+    void shouldNormalizeDecimalScalesExactly() {
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("amount", SqlServerType.DECIMAL, 9, 2)
+                .row(new java.math.BigDecimal("1E+2"))
+                .row(new java.math.BigDecimal("1.2300"))
+                .row(new java.math.BigDecimal("-0.0000")).build();
+        assertWire(table, TYPE_NAME + "01 00 00 00 00 00 00 00 6a 05 09 02 00 00 " +
+                "01 05 01 10 27 00 00 " +
+                "01 05 01 7b 00 00 00 " +
+                "01 05 01 00 00 00 00 00");
+    }
+
+    @Test
+    void shouldEncodeEmptyAndAllNullDecimalTables() {
+        for (SqlServerType type : new SqlServerType[]{SqlServerType.DECIMAL, SqlServerType.NUMERIC}) {
+            String token = type == SqlServerType.DECIMAL ? "6a" : "6c";
+            MssqlTableValue.Builder table = MssqlTableValue.builder("dbo.t").column("amount", type, 38, 38);
+            assertWire(table.build(), TYPE_NAME + "01 00 00 00 00 00 00 00 " + token + " 11 26 26 00 00 00");
+            assertWire(table.row((Object) null).build(),
+                    TYPE_NAME + "01 00 00 00 00 00 01 00 " + token + " 11 26 26 00 00 01 00 00");
+        }
+    }
+
+    @Test
+    void shouldRejectMissingDecimalPrecision() {
+        assertDecimalRejected(MssqlTableValue.builder("dbo.t").column("amount", SqlServerType.DECIMAL).build(),
+                "DECIMAL/NUMERIC precision must be between 1 and 38");
+    }
+
+    @Test
+    void shouldRejectInvalidDecimalPrecisionOnEmptyTables() {
+        for (int precision : new int[]{-1, 0, 39}) {
+            assertDecimalRejected(MssqlTableValue.builder("dbo.t")
+                            .column("amount", SqlServerType.NUMERIC, precision, 0).build(),
+                    "DECIMAL/NUMERIC precision must be between 1 and 38");
+        }
+    }
+
+    @Test
+    void shouldRejectInvalidDecimalScaleOnNullColumns() {
+        for (int scale : new int[]{-1, 10}) {
+            assertDecimalRejected(MssqlTableValue.builder("dbo.t")
+                            .column("amount", SqlServerType.DECIMAL, 9, scale).row((Object) null).build(),
+                    "DECIMAL/NUMERIC scale must be between 0 and precision");
+        }
+    }
+
+    @Test
+    void shouldRejectDecimalMetadataOnIntegerColumn() {
+        assertDecimalRejected(MssqlTableValue.builder("dbo.t")
+                        .column("amount", SqlServerType.INTEGER, 9, 2).build(),
+                "Precision and scale are supported only for DECIMAL/NUMERIC columns");
+    }
+
+    @Test
+    void shouldRejectNonBigDecimalValues() {
+        for (Object value : new Object[]{42, 1.25d, "1.25"}) {
+            assertDecimalRejected(MssqlTableValue.builder("dbo.t")
+                            .column("amount", SqlServerType.DECIMAL, 9, 2).row(value).build(),
+                    "DECIMAL/NUMERIC columns require BigDecimal or null cells");
+        }
+    }
+
+    @Test
+    void shouldRejectDecimalOverflow() {
+        for (String value : new String[]{"10000000", "-10000000", "1E+100"}) {
+            assertDecimalRejected(MssqlTableValue.builder("dbo.t")
+                            .column("amount", SqlServerType.NUMERIC, 9, 2).row(new java.math.BigDecimal(value)).build(),
+                    "DECIMAL/NUMERIC value exceeds declared precision");
+        }
+    }
+
+    @Test
+    void shouldRejectDecimalRounding() {
+        for (String value : new String[]{"1.234", "-1.234"}) {
+            assertDecimalRejected(MssqlTableValue.builder("dbo.t")
+                            .column("amount", SqlServerType.DECIMAL, 9, 2).row(new java.math.BigDecimal(value)).build(),
+                    "DECIMAL/NUMERIC value cannot be represented at declared scale without rounding");
+        }
+    }
+
+    private static void assertDecimalRejected(MssqlTableValue table, String expectedMessage) {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> {
+            Encoded encoded = new DefaultCodecs().encode(TestByteBufAllocator.TEST, RpcParameterContext.in(), table);
+            encoded.dispose();
+        }).isInstanceOf(IllegalArgumentException.class).hasMessage(expectedMessage);
+    }
+
     private static MssqlTableValue.Builder integerTable() {
         return MssqlTableValue.builder("dbo.t").column("value", SqlServerType.INTEGER);
     }

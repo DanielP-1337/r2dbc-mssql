@@ -23,11 +23,13 @@ import io.r2dbc.mssql.message.type.Collation;
 import io.r2dbc.mssql.message.type.SqlServerType;
 import io.r2dbc.mssql.message.type.TdsDataType;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
- * Initial input TVP encoder for BIT, SMALLINT, INTEGER, BIGINT, GUID, DATE and NVARCHAR columns, including NULL cells.
+ * Initial input TVP encoder for scalar columns, including NULL cells.
  * Uses MS-TDS 2.2.5.5.5 metadata and row tokens.
  * This first implementation buffers the complete value; it is not streaming.
  */
@@ -52,8 +54,18 @@ final class TableValueEncoder {
             if (column.getType() != SqlServerType.BIT && column.getType() != SqlServerType.SMALLINT &&
                     column.getType() != SqlServerType.INTEGER && column.getType() != SqlServerType.BIGINT &&
                     column.getType() != SqlServerType.GUID && column.getType() != SqlServerType.DATE &&
-                    column.getType() != SqlServerType.NVARCHAR) {
-                throw new IllegalArgumentException("Initial TVP support accepts only BIT, SMALLINT, INTEGER, BIGINT, GUID, DATE and NVARCHAR columns");
+                    column.getType() != SqlServerType.NVARCHAR && !isDecimal(column.getType())) {
+                throw new IllegalArgumentException("Initial TVP support accepts only BIT, SMALLINT, INTEGER, BIGINT, GUID, DATE, NVARCHAR, DECIMAL and NUMERIC columns");
+            }
+            if (isDecimal(column.getType())) {
+                if (column.getPrecision() < 1 || column.getPrecision() > 38) {
+                    throw new IllegalArgumentException("DECIMAL/NUMERIC precision must be between 1 and 38");
+                }
+                if (column.getScale() < 0 || column.getScale() > column.getPrecision()) {
+                    throw new IllegalArgumentException("DECIMAL/NUMERIC scale must be between 0 and precision");
+                }
+            } else if (column.getPrecision() != 0 || column.getScale() != 0) {
+                throw new IllegalArgumentException("Precision and scale are supported only for DECIMAL/NUMERIC columns");
             }
             if (column.getType() == SqlServerType.NVARCHAR) {
                 collation = context.getRequiredValueContext(RpcParameterContext.CharacterValueContext.class).getCollation();
@@ -70,6 +82,9 @@ final class TableValueEncoder {
                     nullable[i] = true;
                 } else {
                     SqlServerType type = table.getColumns().get(i).getType();
+                    if (isDecimal(type)) {
+                        normalizeDecimal(cell, table.getColumns().get(i));
+                    }
                     if (type == SqlServerType.NVARCHAR) {
                         if (!(cell instanceof String)) {
                             throw new IllegalArgumentException("NVARCHAR columns require String or null cells");
@@ -120,7 +135,13 @@ final class TableValueEncoder {
                 // SQL Server still enforces the declared table type constraints.
                 buffer.writeShortLE(nullable[i] ? 1 : 0); // fNullable.
                 SqlServerType type = table.getColumns().get(i).getType();
-                if (type == SqlServerType.NVARCHAR) {
+                if (isDecimal(type)) {
+                    MssqlTableValue.Column column = table.getColumns().get(i);
+                    buffer.writeByte(type == SqlServerType.DECIMAL ? 0x6a : 0x6c);
+                    buffer.writeByte(decimalLength(column.getPrecision()));
+                    buffer.writeByte(column.getPrecision());
+                    buffer.writeByte(column.getScale());
+                } else if (type == SqlServerType.NVARCHAR) {
                     buffer.writeByte(0xe7); // NVARCHARTYPE.
                     buffer.writeShortLE(8000); // Default capacity: 4000 UTF-16 code units.
                     collation.encode(buffer);
@@ -154,6 +175,18 @@ final class TableValueEncoder {
                         }
                     } else if (cell == null) {
                         buffer.writeByte(0); // NULL: zero length, no value bytes.
+                    } else if (isDecimal(table.getColumns().get(i).getType())) {
+                        MssqlTableValue.Column column = table.getColumns().get(i);
+                        BigDecimal value = normalizeDecimal(cell, column);
+                        int length = decimalLength(column.getPrecision());
+                        byte[] magnitude = value.unscaledValue().abs().toByteArray();
+                        buffer.writeByte(length);
+                        buffer.writeByte(value.signum() < 0 ? 0 : 1);
+                        // Convert the magnitude to fixed-width unsigned little-endian bytes.
+                        for (int j = 0; j < length - 1; j++) {
+                            int source = magnitude.length - 1 - j;
+                            buffer.writeByte(source >= 0 ? magnitude[source] : 0);
+                        }
                     } else if (table.getColumns().get(i).getType() == SqlServerType.DATE) {
                         java.time.LocalDate date = (java.time.LocalDate) cell;
                         long days = java.time.temporal.ChronoUnit.DAYS.between(
@@ -198,6 +231,37 @@ final class TableValueEncoder {
             buffer.release();
             throw e;
         }
+    }
+
+    private static boolean isDecimal(SqlServerType type) {
+        return type == SqlServerType.DECIMAL || type == SqlServerType.NUMERIC;
+    }
+
+    private static int decimalLength(int precision) {
+        return precision <= 9 ? 5 : precision <= 19 ? 9 : precision <= 28 ? 13 : 17;
+    }
+
+    private static BigDecimal normalizeDecimal(Object cell, MssqlTableValue.Column column) {
+
+        if (!(cell instanceof BigDecimal)) {
+            throw new IllegalArgumentException("DECIMAL/NUMERIC columns require BigDecimal or null cells");
+        }
+        BigDecimal value = (BigDecimal) cell;
+        // Reject excessive integer digits before rescaling (including negative Java scales).
+        if (value.signum() != 0 && (long) value.precision() - value.scale() >
+                column.getPrecision() - column.getScale()) {
+            throw new IllegalArgumentException("DECIMAL/NUMERIC value exceeds declared precision");
+        }
+        BigDecimal normalized;
+        try {
+            normalized = value.setScale(column.getScale(), RoundingMode.UNNECESSARY);
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException("DECIMAL/NUMERIC value cannot be represented at declared scale without rounding", e);
+        }
+        if (normalized.precision() > column.getPrecision()) {
+            throw new IllegalArgumentException("DECIMAL/NUMERIC value exceeds declared precision");
+        }
+        return normalized;
     }
 
     private static void writeIdentifier(ByteBuf buffer, String value) {
