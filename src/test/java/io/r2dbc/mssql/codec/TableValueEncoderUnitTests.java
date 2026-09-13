@@ -180,6 +180,28 @@ class TableValueEncoderUnitTests {
                 "00");
     }
 
+    @Test
+    void shouldEncodeGuidByteOrderAndNull() {
+
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("value", SqlServerType.GUID)
+                .row(java.util.UUID.fromString("00112233-4455-6677-8899-aabbccddeeff"))
+                .row((Object) null)
+                .row(new java.util.UUID(0L, 0L))
+                .build();
+
+        // GUID (0x24), 16-byte maximum length, nullable column.
+        // The first 4/2/2-byte fields are little-endian; the final eight bytes
+        // retain their UUID order. An all-zero UUID is distinct from NULL.
+        assertWire(table, TYPE_NAME + "01 00 " +
+                "00 00 00 00 01 00 24 10 00 " +
+                "00 " +
+                "01 10 33 22 11 00 55 44 77 66 88 99 aa bb cc dd ee ff " +
+                "01 00 " +
+                "01 10 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 " +
+                "00");
+    }
+
     private static MssqlTableValue.Builder integerTable() {
         return MssqlTableValue.builder("dbo.t").column("value", SqlServerType.INTEGER);
     }

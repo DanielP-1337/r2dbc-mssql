@@ -26,7 +26,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
- * Initial input TVP encoder for BIT, SMALLINT, INTEGER and BIGINT columns, including NULL cells.
+ * Initial input TVP encoder for BIT, SMALLINT, INTEGER, BIGINT and GUID columns, including NULL cells.
  * Uses MS-TDS 2.2.5.5.5 metadata and row tokens.
  * This first implementation buffers the complete value; it is not streaming.
  */
@@ -48,8 +48,9 @@ final class TableValueEncoder {
         }
         for (MssqlTableValue.Column column : table.getColumns()) {
             if (column.getType() != SqlServerType.BIT && column.getType() != SqlServerType.SMALLINT &&
-                    column.getType() != SqlServerType.INTEGER && column.getType() != SqlServerType.BIGINT) {
-                throw new IllegalArgumentException("Initial TVP support accepts only BIT, SMALLINT, INTEGER and BIGINT columns");
+                    column.getType() != SqlServerType.INTEGER && column.getType() != SqlServerType.BIGINT &&
+                    column.getType() != SqlServerType.GUID) {
+                throw new IllegalArgumentException("Initial TVP support accepts only BIT, SMALLINT, INTEGER, BIGINT and GUID columns");
             }
         }
         boolean[] nullable = new boolean[table.getColumns().size()];
@@ -63,6 +64,9 @@ final class TableValueEncoder {
                     nullable[i] = true;
                 } else {
                     SqlServerType type = table.getColumns().get(i).getType();
+                    if (type == SqlServerType.GUID && !(cell instanceof java.util.UUID)) {
+                        throw new IllegalArgumentException("GUID columns require UUID or null cells");
+                    }
                     if (type == SqlServerType.BIT && !(cell instanceof Boolean)) {
                         throw new IllegalArgumentException("BIT columns require Boolean or null cells");
                     }
@@ -93,7 +97,10 @@ final class TableValueEncoder {
                 // SQL Server still enforces the declared table type constraints.
                 buffer.writeShortLE(nullable[i] ? 1 : 0); // fNullable.
                 SqlServerType type = table.getColumns().get(i).getType();
-                if (type == SqlServerType.BIT) {
+                if (type == SqlServerType.GUID) {
+                    buffer.writeByte(0x24); // GUIDTYPE.
+                    buffer.writeByte(16);
+                } else if (type == SqlServerType.BIT) {
                     buffer.writeByte(0x68); // BITNTYPE.
                     buffer.writeByte(1);
                 } else {
@@ -109,7 +116,17 @@ final class TableValueEncoder {
                 for (int i = 0; i < row.size(); i++) {
                     Object cell = row.get(i);
                     if (cell == null) {
-                        buffer.writeByte(0); // INTN/BITN NULL: zero length, no value bytes.
+                        buffer.writeByte(0); // NULL: zero length, no value bytes.
+                    } else if (table.getColumns().get(i).getType() == SqlServerType.GUID) {
+                        java.util.UUID uuid = (java.util.UUID) cell;
+                        long msb = uuid.getMostSignificantBits();
+                        buffer.writeByte(16);
+                        // SQL Server GUID order: first 4/2/2 bytes little-endian,
+                        // followed by the final eight bytes in UUID order.
+                        buffer.writeIntLE((int) (msb >>> 32));
+                        buffer.writeShortLE((int) (msb >>> 16));
+                        buffer.writeShortLE((int) msb);
+                        buffer.writeLong(uuid.getLeastSignificantBits());
                     } else if (table.getColumns().get(i).getType() == SqlServerType.BIT) {
                         buffer.writeByte(1);
                         buffer.writeByte((Boolean) cell ? 1 : 0);
