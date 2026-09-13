@@ -653,6 +653,77 @@ class TableValueEncoderUnitTests {
         }).isInstanceOf(IllegalArgumentException.class).hasMessage("NVARCHAR columns require String or null cells");
     }
 
+    @Test
+    void shouldEncodeExplicitVarbinaryMaxBytesEmptyAndNull() {
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .columnMax("value", SqlServerType.VARBINARY)
+                .row(new byte[]{0x00, 0x01, 0x7f, (byte) 0x80, (byte) 0xff, 0x00})
+                .row(new byte[0]).row((Object) null).build();
+
+        // MAX metadata has length 0xffff and no collation. A non-null PLP value
+        // has an eight-byte total length, length-prefixed chunks and a zero terminator.
+        // NULL is eight 0xff bytes, with no chunk terminator.
+        assertWire(table, TYPE_NAME + "01 00 " +
+                "00 00 00 00 01 00 a5 ff ff 00 00 " +
+                "01 06 00 00 00 00 00 00 00 06 00 00 00 00 01 7f 80 ff 00 00 00 00 00 " +
+                "01 00 00 00 00 00 00 00 00 00 00 00 00 " +
+                "01 ff ff ff ff ff ff ff ff 00");
+    }
+
+    @Test
+    void shouldEncodeVarbinaryMaxAbove8000Bytes() {
+        byte[] value = new byte[8001];
+        java.util.Arrays.fill(value, (byte) 0xa5);
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .columnMax("value", SqlServerType.VARBINARY).row(value).build();
+
+        // 8001 bytes = 0x1f41, emitted as one buffered PLP chunk.
+        assertWire(table, TYPE_NAME + "01 00 " +
+                "00 00 00 00 00 00 a5 ff ff 00 00 " +
+                "01 41 1f 00 00 00 00 00 00 41 1f 00 00 " +
+                String.join("", java.util.Collections.nCopies(8001, "a5 ")) +
+                "00 00 00 00 00");
+    }
+
+    @Test
+    void shouldEncodeEmptyVarbinaryMaxTable() {
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .columnMax("value", SqlServerType.VARBINARY).build();
+        assertWire(table, TYPE_NAME + "01 00 00 00 00 00 00 00 a5 ff ff 00 00 00");
+    }
+
+    @Test
+    void shouldEncodeAllNullVarbinaryMaxColumn() {
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .columnMax("value", SqlServerType.VARBINARY).row((Object) null).build();
+        assertWire(table, TYPE_NAME + "01 00 00 00 00 00 01 00 a5 ff ff 00 00 " +
+                "01 ff ff ff ff ff ff ff ff 00");
+    }
+
+    @Test
+    void shouldEncodeVarbinaryMaxWithPlpLengthAboveUnsignedShort() {
+        byte[] value = new byte[65537];
+        java.util.Arrays.fill(value, (byte) 0xa5);
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .columnMax("value", SqlServerType.VARBINARY).row(value).build();
+        // 65537 bytes = 0x00010001, requiring more than a 16-bit length.
+        assertWire(table, TYPE_NAME + "01 00 00 00 00 00 00 00 a5 ff ff 00 00 " +
+                "01 01 00 01 00 00 00 00 00 01 00 01 00 " +
+                String.join("", java.util.Collections.nCopies(65537, "a5 ")) + "00 00 00 00 00");
+    }
+
+    @Test
+    void shouldRejectIncompatibleVarbinaryMaxValues() {
+        for (Object value : new Object[]{"0x01", new Byte[]{1}, java.nio.ByteBuffer.wrap(new byte[]{1})}) {
+            MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                    .columnMax("value", SqlServerType.VARBINARY).row(value).build();
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> {
+                Encoded encoded = new DefaultCodecs().encode(TestByteBufAllocator.TEST, RpcParameterContext.in(), table);
+                encoded.dispose();
+            }).isInstanceOf(IllegalArgumentException.class).hasMessage("VARBINARY columns require byte[] or null cells");
+        }
+    }
+
     private static MssqlTableValue.Builder integerTable() {
         return MssqlTableValue.builder("dbo.t").column("value", SqlServerType.INTEGER);
     }

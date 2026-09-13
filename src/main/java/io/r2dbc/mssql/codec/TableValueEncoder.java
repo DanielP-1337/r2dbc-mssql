@@ -51,8 +51,8 @@ final class TableValueEncoder {
         }
         Collation collation = null;
         for (MssqlTableValue.Column column : table.getColumns()) {
-            if (column.isMax() && column.getType() != SqlServerType.NVARCHAR) {
-                throw new IllegalArgumentException("Initial MAX support accepts only NVARCHAR columns");
+            if (column.isMax() && column.getType() != SqlServerType.NVARCHAR && column.getType() != SqlServerType.VARBINARY) {
+                throw new IllegalArgumentException("MAX support accepts only NVARCHAR and VARBINARY columns");
             }
             if (column.getType() != SqlServerType.BIT && column.getType() != SqlServerType.SMALLINT &&
                     column.getType() != SqlServerType.INTEGER && column.getType() != SqlServerType.BIGINT &&
@@ -93,7 +93,7 @@ final class TableValueEncoder {
                         if (!(cell instanceof byte[])) {
                             throw new IllegalArgumentException("VARBINARY columns require byte[] or null cells");
                         }
-                        if (((byte[]) cell).length > 8000) {
+                        if (!table.getColumns().get(i).isMax() && ((byte[]) cell).length > 8000) {
                             throw new IllegalArgumentException("Initial VARBINARY support accepts at most 8000 bytes per cell");
                         }
                     }
@@ -155,7 +155,7 @@ final class TableValueEncoder {
                     buffer.writeByte(column.getScale());
                 } else if (type == SqlServerType.VARBINARY) {
                     buffer.writeByte(0xa5); // BIGVARBINARY.
-                    buffer.writeShortLE(8000); // Default capacity in bytes; no collation.
+                    buffer.writeShortLE(table.getColumns().get(i).isMax() ? 0xffff : 8000); // No collation.
                 } else if (type == SqlServerType.NVARCHAR) {
                     buffer.writeByte(0xe7); // NVARCHARTYPE.
                     buffer.writeShortLE(table.getColumns().get(i).isMax() ? 0xffff : 8000);
@@ -181,7 +181,9 @@ final class TableValueEncoder {
                 for (int i = 0; i < row.size(); i++) {
                     Object cell = row.get(i);
                     if (table.getColumns().get(i).getType() == SqlServerType.VARBINARY) {
-                        if (cell == null) {
+                        if (table.getColumns().get(i).isMax()) {
+                            writePlpBytes(buffer, (byte[]) cell);
+                        } else if (cell == null) {
                             buffer.writeShortLE(0xffff);
                         } else {
                             byte[] value = (byte[]) cell;
@@ -190,7 +192,7 @@ final class TableValueEncoder {
                         }
                     } else if (table.getColumns().get(i).getType() == SqlServerType.NVARCHAR) {
                         if (table.getColumns().get(i).isMax()) {
-                            writeNvarcharMax(buffer, (String) cell);
+                            writePlpBytes(buffer, cell == null ? null : ((String) cell).getBytes(StandardCharsets.UTF_16LE));
                         } else if (cell == null) {
                             buffer.writeShortLE(0xffff);
                         } else {
@@ -258,15 +260,13 @@ final class TableValueEncoder {
         }
     }
 
-    private static void writeNvarcharMax(ByteBuf buffer, String value) {
-        if (value == null) {
+    private static void writePlpBytes(ByteBuf buffer, byte[] bytes) {
+        if (bytes == null) {
             buffer.writeLongLE(-1L); // PLP_NULL has no chunk or terminator.
             return;
         }
 
-        // Use the encoded byte count for both PLP lengths, including surrogate pairs.
-        // This initial MAX implementation still buffers the complete cell and TVP.
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_16LE);
+        // Both MAX types use byte counts. This implementation still buffers the complete TVP.
         buffer.writeLongLE(bytes.length);
         if (bytes.length != 0) {
             buffer.writeIntLE(bytes.length);
