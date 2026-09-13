@@ -64,6 +64,9 @@ public enum TdsDataType {
     UDT(0xF0, LengthStrategy.PARTLENTYPE), // -16
     XML(0xF1, LengthStrategy.PARTLENTYPE), // -15
 
+    // Structured input parameter; not a scalar result column.
+    TVP(0xF3, LengthStrategy.TVPTYPE),
+
     // LONGLEN types
     SQL_VARIANT(0x62, LengthStrategy.LONGLENTYPE); // 98
 

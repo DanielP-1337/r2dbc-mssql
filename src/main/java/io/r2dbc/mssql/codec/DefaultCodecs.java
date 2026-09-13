@@ -108,6 +108,10 @@ public final class DefaultCodecs implements Codecs {
         Assert.requireNonNull(context, "RpcParameterContext must not be null");
         Assert.requireNonNull(value, "Value must not be null");
 
+        if (value instanceof io.r2dbc.mssql.MssqlTableValue) {
+            return TableValueEncoder.encode(allocator, (io.r2dbc.mssql.MssqlTableValue) value);
+        }
+
         Object parameterValue = value;
         SqlServerType serverType;
 

@@ -48,5 +48,10 @@ public enum LengthStrategy {
      * Partially length type such as {@code BIGVARCHARTYPE}, {@code UDTTYYPE}, {@code NVARCHARTYPE} using a {@code short} as length
      * descriptor (0-8000).
      */
-    PARTLENTYPE
+    PARTLENTYPE,
+
+    /**
+     * Table-valued parameter metadata and row tokens (input only).
+     */
+    TVPTYPE
 }
