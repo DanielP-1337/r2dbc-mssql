@@ -202,6 +202,64 @@ class TableValueEncoderUnitTests {
                 "00");
     }
 
+    @Test
+    void shouldEncodeDateBoundariesLeapDayAndNull() {
+
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("value", SqlServerType.DATE)
+                .row(java.time.LocalDate.of(1, 1, 1))
+                .row(java.time.LocalDate.of(2000, 2, 29))
+                .row((Object) null)
+                .row(java.time.LocalDate.of(9999, 12, 31))
+                .build();
+
+        // DATENTYPE (0x28) has no maximum-length byte in TYPE_INFO.
+        // Values contain a length byte and three little-endian bytes counting
+        // days since 0001-01-01. Day zero is distinct from NULL.
+        // Independently calculated day counts: 0, 730178 and 3652058.
+        assertWire(table, TYPE_NAME + "01 00 " +
+                "00 00 00 00 01 00 28 00 " +
+                "00 " +
+                "01 03 00 00 00 " +
+                "01 03 42 24 0b " +
+                "01 00 " +
+                "01 03 da b9 37 " +
+                "00");
+    }
+
+    @Test
+    void shouldRejectDateBeforeSqlServerRange() {
+        assertDateRejected(java.time.LocalDate.of(0, 12, 31),
+                "DATE values must be between 0001-01-01 and 9999-12-31");
+    }
+
+    @Test
+    void shouldRejectDateAfterSqlServerRange() {
+        assertDateRejected(java.time.LocalDate.of(10000, 1, 1),
+                "DATE values must be between 0001-01-01 and 9999-12-31");
+    }
+
+    @Test
+    void shouldRejectStringInDateColumn() {
+        assertDateRejected("2000-02-29", "DATE columns require LocalDate or null cells");
+    }
+
+    private static void assertDateRejected(Object value, String expectedMessage) {
+
+        MssqlTableValue table = MssqlTableValue.builder("dbo.t")
+                .column("value", SqlServerType.DATE)
+                .row(value)
+                .build();
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> {
+            Encoded encoded = new DefaultCodecs().encode(
+                    TestByteBufAllocator.TEST, RpcParameterContext.in(), table);
+            // Release the buffer even if the expected rejection is missing.
+            encoded.dispose();
+        }).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage(expectedMessage);
+    }
+
     private static MssqlTableValue.Builder integerTable() {
         return MssqlTableValue.builder("dbo.t").column("value", SqlServerType.INTEGER);
     }
