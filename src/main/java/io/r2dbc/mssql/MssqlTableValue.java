@@ -29,9 +29,11 @@ import java.util.List;
  * Value for a SQL Server table-valued parameter with buffered or publisher-backed rows.
  *
  * <p>Publisher-backed rows are consumed during execution. Scalar cells are buffered;
- * Blob values in VARBINARY(MAX) columns are streamed in chunks, including in buffered rows.
- * A Blob is consumed once. After subscription, cancellation releases its stream resources.
- * An acquired Blob whose stream has not been subscribed is released through discard().
+ * Blob values in VARBINARY(MAX) and Clob values in NVARCHAR(MAX) columns are streamed
+ * in chunks, including in buffered rows. Clob chunks preserve UTF-16 code units even
+ * when a surrogate pair spans source chunks.
+ * A Blob or Clob is consumed once. After subscription, cancellation releases its stream resources.
+ * An acquired Blob or Clob whose stream has not been subscribed is released through discard().
  */
 public final class MssqlTableValue {
 

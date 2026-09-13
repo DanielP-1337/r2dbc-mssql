@@ -20,6 +20,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.r2dbc.mssql.MssqlTableValue;
 import io.r2dbc.spi.Blob;
+import io.r2dbc.spi.Clob;
 import io.r2dbc.mssql.message.type.Collation;
 import io.r2dbc.mssql.message.type.SqlServerType;
 import io.r2dbc.mssql.message.type.TdsDataType;
@@ -35,7 +36,7 @@ import java.util.List;
 /**
  * Initial input TVP encoder for scalar columns, including NULL cells.
  * Uses MS-TDS 2.2.5.5.5 metadata and row tokens.
- * Buffered scalar tables retain their original encoding. Blob cells stream one chunk at a time.
+ * Buffered scalar tables retain their original encoding. Blob and Clob cells stream one chunk at a time.
  */
 final class TableValueEncoder {
 
@@ -79,7 +80,7 @@ final class TableValueEncoder {
                 collation = context.getRequiredValueContext(RpcParameterContext.CharacterValueContext.class).getCollation();
             }
         }
-        if (table.getRowPublisher() != null || table.getRows().stream().anyMatch(TableValueEncoder::hasBlob)) {
+        if (table.getRowPublisher() != null || table.getRows().stream().anyMatch(TableValueEncoder::hasLob)) {
             return encodeStream(allocator, table, names, collation);
         }
         boolean[] nullable = new boolean[table.getColumns().size()];
@@ -126,7 +127,7 @@ final class TableValueEncoder {
                             Flux.fromIterable(table.getRows()) : Flux.from(table.getRowPublisher());
                     Flux<ByteBuf> rows = source.concatMap(row -> Flux.defer(() -> {
                         validateRow(row, table.getColumns(), nullable);
-                        if (!hasBlob(row)) {
+                        if (!hasLob(row)) {
                             return Mono.fromSupplier(() -> allocateAndWrite(allocator,
                                     buffer -> writeRow(buffer, row, table.getColumns()))).flux();
                         }
@@ -136,6 +137,9 @@ final class TableValueEncoder {
                                     Object cell = row.get(index);
                                     if (cell instanceof Blob) {
                                         return streamBlob(allocator, (Blob) cell);
+                                    }
+                                    if (cell instanceof Clob) {
+                                        return streamClob(allocator, (Clob) cell);
                                     }
                                     return Mono.fromSupplier(() -> allocateAndWrite(allocator,
                                             buffer -> writeCell(buffer, cell, table.getColumns().get(index)))).flux();
@@ -184,6 +188,9 @@ final class TableValueEncoder {
                     }
                 }
                 if (type == SqlServerType.NVARCHAR) {
+                    if (cell instanceof Clob && columns.get(i).isMax()) {
+                        continue;
+                    }
                     if (!(cell instanceof String)) {
                         throw new IllegalArgumentException("NVARCHAR columns require String or null cells");
                     }
@@ -335,8 +342,38 @@ final class TableValueEncoder {
     }
 
 
-    private static boolean hasBlob(List<?> row) {
-        return row.stream().anyMatch(Blob.class::isInstance);
+    private static boolean hasLob(List<?> row) {
+        return row.stream().anyMatch(cell -> cell instanceof Blob || cell instanceof Clob);
+    }
+
+    private static Flux<ByteBuf> streamClob(ByteBufAllocator allocator, Clob clob) {
+        return Flux.defer(() -> {
+            java.util.concurrent.atomic.AtomicBoolean subscribed = new java.util.concurrent.atomic.AtomicBoolean();
+            return Flux.usingWhen(Mono.just(clob), value -> Flux.concat(
+                        Mono.fromSupplier(() -> allocateAndWrite(allocator, buffer -> buffer.writeLongLE(-2L))),
+                        Flux.defer(() -> Flux.from(value.stream()))
+                                .doOnSubscribe(subscription -> subscribed.set(true))
+                                .filter(chunk -> chunk.length() != 0)
+                                .concatMap(chunk -> Mono.fromSupplier(() -> allocateAndWrite(allocator, buffer -> {
+                                    int length = chunk.length();
+                                    buffer.writeIntLE(Math.multiplyExact(length, 2));
+                                    // Preserve UTF-16 code units across PLP chunk boundaries.
+                                    // Encoding each chunk as an independent String would replace
+                                    // surrogate halves when a source splits an emoji between chunks.
+                                    for (int i = 0; i < length; i++) {
+                                        buffer.writeShortLE(chunk.charAt(i));
+                                    }
+                                })), 0),
+                        Mono.fromSupplier(() -> allocateAndWrite(allocator, buffer -> buffer.writeIntLE(0)))),
+                    value -> discardUnsubscribedClob(value, subscribed),
+                    (value, error) -> discardUnsubscribedClob(value, subscribed),
+                    value -> discardUnsubscribedClob(value, subscribed));
+        });
+    }
+
+    private static Mono<Void> discardUnsubscribedClob(Clob clob, java.util.concurrent.atomic.AtomicBoolean subscribed) {
+        // As with Blob, an already subscribed stream owns cleanup and cancellation.
+        return Mono.defer(() -> subscribed.get() ? Mono.empty() : Mono.from(clob.discard()));
     }
 
     private static Flux<ByteBuf> streamBlob(ByteBufAllocator allocator, Blob blob) {
