@@ -24,6 +24,7 @@ import io.r2dbc.mssql.codec.Encoded;
 import io.r2dbc.mssql.codec.PlpEncoded;
 import io.r2dbc.mssql.codec.RpcDirection;
 import io.r2dbc.mssql.codec.RpcEncoding;
+import io.r2dbc.mssql.codec.StreamingEncoded;
 import io.r2dbc.mssql.message.ClientMessage;
 import io.r2dbc.mssql.message.TransactionDescriptor;
 import io.r2dbc.mssql.message.header.HeaderOptions;
@@ -167,6 +168,13 @@ public final class RpcRequest implements ClientMessage, TokenStream {
 
         Assert.requireNonNull(allocator, "ByteBufAllocator must not be null");
 
+        for (ParameterDescriptor descriptor : this.parameterDescriptors) {
+            if (descriptor instanceof EncodedRpcParameter &&
+                    ((EncodedRpcParameter) descriptor).getValue() instanceof StreamingEncoded) {
+                return encodeStreamingRequest(allocator, packetSize);
+            }
+        }
+
         return Flux.defer(() -> {
 
             int name = 2 + (this.procName != null ? this.procName.length() * 2 : 0);
@@ -261,6 +269,67 @@ public final class RpcRequest implements ClientMessage, TokenStream {
                 sink.success(TdsPackets.last(Unpooled.EMPTY_BUFFER));
             }));
         });
+    }
+
+    private Flux<TdsFragment> encodeStreamingRequest(ByteBufAllocator allocator, int packetSize) {
+        return Flux.defer(() -> {
+            AtomicBoolean first = new AtomicBoolean(true);
+            Mono<ByteBuf> header = Mono.fromSupplier(() -> allocateAndWrite(allocator, this::encodeHeader));
+            Flux<ByteBuf> parameters = Flux.fromIterable(this.parameterDescriptors)
+                    .concatMap(parameter -> encodeStreamingParameter(allocator, packetSize, parameter), 0);
+
+            return Flux.concat(header, parameters)
+                    .doOnDiscard(ByteBuf.class, ByteBuf::release)
+                    .map(buffer -> first.getAndSet(false) ?
+                            TdsPackets.first(HEADER, buffer) : TdsPackets.create(buffer))
+                    // Only successful completion marks the end of the RPC message.
+                    .concatWith(Mono.fromSupplier(() -> TdsPackets.last(Unpooled.EMPTY_BUFFER)))
+                    .doOnDiscard(TdsFragment.class, fragment -> fragment.getByteBuf().release());
+        });
+    }
+
+    private Flux<ByteBuf> encodeStreamingParameter(ByteBufAllocator allocator, int packetSize, ParameterDescriptor descriptor) {
+        if (descriptor instanceof EncodedRpcParameter) {
+            EncodedRpcParameter parameter = (EncodedRpcParameter) descriptor;
+            Encoded value = parameter.getValue();
+            if (value instanceof StreamingEncoded) {
+                return Flux.concat(
+                        Mono.fromSupplier(() -> allocateAndWrite(allocator, parameter::encodeHeader)),
+                        Flux.defer(() -> ((StreamingEncoded) value).stream()));
+            }
+            if (value instanceof PlpEncoded) {
+                PlpEncoded plp = (PlpEncoded) value;
+                Mono<ByteBuf> header = Mono.fromSupplier(() -> allocateAndWrite(allocator, buffer -> {
+                    parameter.encodeHeader(buffer);
+                    plp.encodeHeader(buffer);
+                    buffer.writeLongLE(-2L); // Unknown PLP total length, even for an empty source.
+                }));
+                Flux<ByteBuf> chunks = plp.chunked(() -> packetSize * 4, false).map(chunk -> {
+                    try {
+                        return allocateAndWrite(allocator, buffer -> {
+                            buffer.writeIntLE(chunk.readableBytes());
+                            buffer.writeBytes(chunk);
+                        });
+                    } finally {
+                        chunk.release();
+                    }
+                });
+                return Flux.concat(header, chunks,
+                        Mono.fromSupplier(() -> allocateAndWrite(allocator, buffer -> buffer.writeIntLE(0))));
+            }
+        }
+        return Mono.fromSupplier(() -> allocateAndWrite(allocator, descriptor::encode)).flux();
+    }
+
+    private static ByteBuf allocateAndWrite(ByteBufAllocator allocator, java.util.function.Consumer<ByteBuf> writer) {
+        ByteBuf buffer = allocator.buffer();
+        try {
+            writer.accept(buffer);
+            return buffer;
+        } catch (RuntimeException | Error e) {
+            buffer.release();
+            throw e;
+        }
     }
 
     private ByteBuf getByteBuf(AtomicReference<ByteBuf> firstBufferHolder, ByteBufAllocator allocator, ParameterDescriptor it) {
@@ -818,4 +887,3 @@ public final class RpcRequest implements ClientMessage, TokenStream {
     }
 
 }
-

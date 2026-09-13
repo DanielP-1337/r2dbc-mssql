@@ -17,6 +17,8 @@
 package io.r2dbc.mssql;
 
 import io.r2dbc.mssql.message.type.SqlServerType;
+import org.reactivestreams.Publisher;
+import reactor.util.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -24,10 +26,10 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * In-memory value for a SQL Server table-valued parameter.
+ * Value for a SQL Server table-valued parameter with buffered or publisher-backed rows.
  *
- * <p>This initial model does not yet provide TDS encoding. Column metadata
- * and cell validation will be extended with the corresponding tests.
+ * <p>Publisher-backed rows are consumed during execution. Each row is buffered
+ * for encoding; streaming within an individual cell is not yet supported.
  */
 public final class MssqlTableValue {
 
@@ -37,10 +39,14 @@ public final class MssqlTableValue {
 
     private final List<List<Object>> rows;
 
+    @Nullable
+    private final Publisher<? extends List<?>> rowPublisher;
+
     private MssqlTableValue(Builder builder) {
         this.typeName = builder.typeName;
         this.columns = Collections.unmodifiableList(new ArrayList<>(builder.columns));
         this.rows = Collections.unmodifiableList(new ArrayList<>(builder.rows));
+        this.rowPublisher = builder.rowPublisher;
     }
 
     /**
@@ -61,8 +67,19 @@ public final class MssqlTableValue {
         return this.columns;
     }
 
+    /**
+     * @return buffered rows, or an empty list when a row publisher is configured
+     */
     public List<List<Object>> getRows() {
         return this.rows;
+    }
+
+    /**
+     * @return the streaming row source, or null for buffered rows
+     */
+    @Nullable
+    public Publisher<? extends List<?>> getRowPublisher() {
+        return this.rowPublisher;
     }
 
     public static final class Column {
@@ -124,7 +141,7 @@ public final class MssqlTableValue {
     }
 
     /**
-     * Builder for an in-memory table value.
+     * Builder for a table value with buffered or publisher-backed rows.
      */
     public static final class Builder {
 
@@ -133,6 +150,9 @@ public final class MssqlTableValue {
         private final List<Column> columns = new ArrayList<>();
 
         private final List<List<Object>> rows = new ArrayList<>();
+
+        @Nullable
+        private Publisher<? extends List<?>> rowPublisher;
 
         private Builder(String typeName) {
             this.typeName = typeName;
@@ -183,8 +203,31 @@ public final class MssqlTableValue {
          * @return this builder
          */
         public Builder row(Object... values) {
+            if (this.rowPublisher != null) {
+                throw new IllegalStateException("Cannot combine buffered rows with a row publisher");
+            }
             this.rows.add(Collections.unmodifiableList(
                     new ArrayList<>(Arrays.asList(values))));
+            return this;
+        }
+
+        /**
+         * Supply rows in column declaration order for consumption during execution.
+         * The source must honor demand and must not emit null rows. Cells may be null.
+         * Do not mutate a row or its cells after emitting it. Repeated executions
+         * require a source that can be subscribed to again.
+         *
+         * @param rows the row source; cannot be combined with buffered rows
+         * @return this builder
+         */
+        public Builder rows(Publisher<? extends List<?>> rows) {
+            if (rows == null) {
+                throw new IllegalArgumentException("Row publisher must not be null");
+            }
+            if (!this.rows.isEmpty() || this.rowPublisher != null) {
+                throw new IllegalStateException("Cannot combine buffered rows or multiple row publishers");
+            }
+            this.rowPublisher = rows;
             return this;
         }
 

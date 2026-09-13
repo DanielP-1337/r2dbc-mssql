@@ -23,6 +23,9 @@ import io.r2dbc.mssql.message.type.Collation;
 import io.r2dbc.mssql.message.type.SqlServerType;
 import io.r2dbc.mssql.message.type.TdsDataType;
 
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
@@ -31,7 +34,7 @@ import java.util.List;
 /**
  * Initial input TVP encoder for scalar columns, including NULL cells.
  * Uses MS-TDS 2.2.5.5.5 metadata and row tokens.
- * This first implementation buffers the complete value; it is not streaming.
+ * Buffered tables retain their original encoding. Streaming sources buffer one row at a time.
  */
 final class TableValueEncoder {
 
@@ -75,178 +78,21 @@ final class TableValueEncoder {
                 collation = context.getRequiredValueContext(RpcParameterContext.CharacterValueContext.class).getCollation();
             }
         }
+        if (table.getRowPublisher() != null) {
+            return encodeStream(allocator, table, names, collation);
+        }
         boolean[] nullable = new boolean[table.getColumns().size()];
         for (List<Object> row : table.getRows()) {
-            if (row.size() != table.getColumns().size()) {
-                throw new IllegalArgumentException("TVP row width must match the column count");
-            }
-            for (int i = 0; i < row.size(); i++) {
-                Object cell = row.get(i);
-                if (cell == null) {
-                    nullable[i] = true;
-                } else {
-                    SqlServerType type = table.getColumns().get(i).getType();
-                    if (isDecimal(type)) {
-                        normalizeDecimal(cell, table.getColumns().get(i));
-                    }
-                    if (type == SqlServerType.VARBINARY) {
-                        if (!(cell instanceof byte[])) {
-                            throw new IllegalArgumentException("VARBINARY columns require byte[] or null cells");
-                        }
-                        if (!table.getColumns().get(i).isMax() && ((byte[]) cell).length > 8000) {
-                            throw new IllegalArgumentException("Initial VARBINARY support accepts at most 8000 bytes per cell");
-                        }
-                    }
-                    if (type == SqlServerType.NVARCHAR) {
-                        if (!(cell instanceof String)) {
-                            throw new IllegalArgumentException("NVARCHAR columns require String or null cells");
-                        }
-                        if (!table.getColumns().get(i).isMax() && ((String) cell).length() > 4000) {
-                            throw new IllegalArgumentException("Initial NVARCHAR support accepts at most 4000 UTF-16 code units per cell");
-                        }
-                    }
-                    if (type == SqlServerType.DATE) {
-                        if (!(cell instanceof java.time.LocalDate)) {
-                            throw new IllegalArgumentException("DATE columns require LocalDate or null cells");
-                        }
-                        int year = ((java.time.LocalDate) cell).getYear();
-                        if (year < 1 || year > 9999) {
-                            throw new IllegalArgumentException("DATE values must be between 0001-01-01 and 9999-12-31");
-                        }
-                    }
-                    if (type == SqlServerType.GUID && !(cell instanceof java.util.UUID)) {
-                        throw new IllegalArgumentException("GUID columns require UUID or null cells");
-                    }
-                    if (type == SqlServerType.BIT && !(cell instanceof Boolean)) {
-                        throw new IllegalArgumentException("BIT columns require Boolean or null cells");
-                    }
-                    if (type == SqlServerType.SMALLINT && !(cell instanceof Short)) {
-                        throw new IllegalArgumentException("SMALLINT columns require Short or null cells");
-                    }
-                    if (type == SqlServerType.INTEGER && !(cell instanceof Integer)) {
-                        throw new IllegalArgumentException("INTEGER columns require Integer or null cells");
-                    }
-                    if (type == SqlServerType.BIGINT && !(cell instanceof Long)) {
-                        throw new IllegalArgumentException("BIGINT columns require Long or null cells");
-                    }
-                }
-            }
+            validateRow(row, table.getColumns(), nullable);
         }
 
         ByteBuf buffer = allocator.buffer();
         try {
-            // RpcEncoding.encodeHeader writes TVPTYPE (0xF3) separately.
-            buffer.writeByte(0); // DbName must be empty.
-            writeIdentifier(buffer, names[0]);
-            writeIdentifier(buffer, names[1]);
-
-            buffer.writeShortLE(table.getColumns().size());
-            for (int i = 0; i < table.getColumns().size(); i++) {
-                buffer.writeIntLE(0); // UserType.
-                // Infer wire nullability from this buffered value, per column.
-                // SQL Server still enforces the declared table type constraints.
-                buffer.writeShortLE(nullable[i] ? 1 : 0); // fNullable.
-                SqlServerType type = table.getColumns().get(i).getType();
-                if (isDecimal(type)) {
-                    MssqlTableValue.Column column = table.getColumns().get(i);
-                    buffer.writeByte(type == SqlServerType.DECIMAL ? 0x6a : 0x6c);
-                    buffer.writeByte(decimalLength(column.getPrecision()));
-                    buffer.writeByte(column.getPrecision());
-                    buffer.writeByte(column.getScale());
-                } else if (type == SqlServerType.VARBINARY) {
-                    buffer.writeByte(0xa5); // BIGVARBINARY.
-                    buffer.writeShortLE(table.getColumns().get(i).isMax() ? 0xffff : 8000); // No collation.
-                } else if (type == SqlServerType.NVARCHAR) {
-                    buffer.writeByte(0xe7); // NVARCHARTYPE.
-                    buffer.writeShortLE(table.getColumns().get(i).isMax() ? 0xffff : 8000);
-                    collation.encode(buffer);
-                } else if (type == SqlServerType.DATE) {
-                    buffer.writeByte(0x28); // DATENTYPE has no length in TYPE_INFO.
-                } else if (type == SqlServerType.GUID) {
-                    buffer.writeByte(0x24); // GUIDTYPE.
-                    buffer.writeByte(16);
-                } else if (type == SqlServerType.BIT) {
-                    buffer.writeByte(0x68); // BITNTYPE.
-                    buffer.writeByte(1);
-                } else {
-                    buffer.writeByte(0x26); // INTNTYPE.
-                    buffer.writeByte(type == SqlServerType.BIGINT ? 8 : type == SqlServerType.SMALLINT ? 2 : 4);
-                }
-                buffer.writeByte(0); // Column name must be empty in a TVP.
-            }
-            buffer.writeByte(0); // End of optional metadata.
-
+            writeMetadata(buffer, table, names, collation, nullable);
             for (List<Object> row : table.getRows()) {
-                buffer.writeByte(1); // TVP_ROW.
-                for (int i = 0; i < row.size(); i++) {
-                    Object cell = row.get(i);
-                    if (table.getColumns().get(i).getType() == SqlServerType.VARBINARY) {
-                        if (table.getColumns().get(i).isMax()) {
-                            writePlpBytes(buffer, (byte[]) cell);
-                        } else if (cell == null) {
-                            buffer.writeShortLE(0xffff);
-                        } else {
-                            byte[] value = (byte[]) cell;
-                            buffer.writeShortLE(value.length);
-                            buffer.writeBytes(value);
-                        }
-                    } else if (table.getColumns().get(i).getType() == SqlServerType.NVARCHAR) {
-                        if (table.getColumns().get(i).isMax()) {
-                            writePlpBytes(buffer, cell == null ? null : ((String) cell).getBytes(StandardCharsets.UTF_16LE));
-                        } else if (cell == null) {
-                            buffer.writeShortLE(0xffff);
-                        } else {
-                            String value = (String) cell;
-                            buffer.writeShortLE(value.length() * 2);
-                            buffer.writeCharSequence(value, StandardCharsets.UTF_16LE);
-                        }
-                    } else if (cell == null) {
-                        buffer.writeByte(0); // NULL: zero length, no value bytes.
-                    } else if (isDecimal(table.getColumns().get(i).getType())) {
-                        MssqlTableValue.Column column = table.getColumns().get(i);
-                        BigDecimal value = normalizeDecimal(cell, column);
-                        int length = decimalLength(column.getPrecision());
-                        byte[] magnitude = value.unscaledValue().abs().toByteArray();
-                        buffer.writeByte(length);
-                        buffer.writeByte(value.signum() < 0 ? 0 : 1);
-                        // Convert the magnitude to fixed-width unsigned little-endian bytes.
-                        for (int j = 0; j < length - 1; j++) {
-                            int source = magnitude.length - 1 - j;
-                            buffer.writeByte(source >= 0 ? magnitude[source] : 0);
-                        }
-                    } else if (table.getColumns().get(i).getType() == SqlServerType.DATE) {
-                        java.time.LocalDate date = (java.time.LocalDate) cell;
-                        long days = java.time.temporal.ChronoUnit.DAYS.between(
-                                java.time.LocalDate.of(1, 1, 1), date);
-                        buffer.writeByte(3);
-                        buffer.writeMediumLE((int) days);
-                    } else if (table.getColumns().get(i).getType() == SqlServerType.GUID) {
-                        java.util.UUID uuid = (java.util.UUID) cell;
-                        long msb = uuid.getMostSignificantBits();
-                        buffer.writeByte(16);
-                        // SQL Server GUID order: first 4/2/2 bytes little-endian,
-                        // followed by the final eight bytes in UUID order.
-                        buffer.writeIntLE((int) (msb >>> 32));
-                        buffer.writeShortLE((int) (msb >>> 16));
-                        buffer.writeShortLE((int) msb);
-                        buffer.writeLong(uuid.getLeastSignificantBits());
-                    } else if (table.getColumns().get(i).getType() == SqlServerType.BIT) {
-                        buffer.writeByte(1);
-                        buffer.writeByte((Boolean) cell ? 1 : 0);
-                    } else if (table.getColumns().get(i).getType() == SqlServerType.SMALLINT) {
-                        buffer.writeByte(2);
-                        buffer.writeShortLE((Short) cell);
-                    } else if (table.getColumns().get(i).getType() == SqlServerType.BIGINT) {
-                        buffer.writeByte(8);
-                        buffer.writeLongLE((Long) cell);
-                    } else {
-                        buffer.writeByte(4);
-                        buffer.writeIntLE((Integer) cell);
-                    }
-                }
+                writeRow(buffer, row, table.getColumns());
             }
             buffer.writeByte(0); // End of rows.
-
             final String formalType = "[" + names[0] + "].[" + names[1] + "] READONLY";
             return new Encoded(TdsDataType.TVP, new Encoded.DisposableSupplier(buffer)) {
                 @Override
@@ -257,6 +103,213 @@ final class TableValueEncoder {
         } catch (RuntimeException | Error e) {
             buffer.release();
             throw e;
+        }
+    }
+
+    private static Encoded encodeStream(ByteBufAllocator allocator, MssqlTableValue table, String[] names, Collation collation) {
+        return new StreamingEncoded(TdsDataType.TVP) {
+            @Override
+            public String getFormalType() {
+                return "[" + names[0] + "].[" + names[1] + "] READONLY";
+            }
+
+            @Override
+            public Flux<ByteBuf> stream() {
+                return Flux.defer(() -> {
+                    // Future rows are unknown. Server-side table constraints remain authoritative.
+                    boolean[] nullable = new boolean[table.getColumns().size()];
+                    java.util.Arrays.fill(nullable, true);
+                    Mono<ByteBuf> metadata = Mono.fromSupplier(() -> allocateAndWrite(allocator,
+                            buffer -> writeMetadata(buffer, table, names, collation, nullable)));
+                    Flux<ByteBuf> rows = Flux.from(table.getRowPublisher()).concatMap(row -> Mono.fromSupplier(() -> {
+                        validateRow(row, table.getColumns(), nullable);
+                        return allocateAndWrite(allocator, buffer -> writeRow(buffer, row, table.getColumns()));
+                    }), 0); // No row prefetch; read and encode one row per downstream request.
+                    return Flux.concat(metadata, rows,
+                            Mono.fromSupplier(() -> allocateAndWrite(allocator, buffer -> buffer.writeByte(0))));
+                });
+            }
+        };
+    }
+
+    private static ByteBuf allocateAndWrite(ByteBufAllocator allocator, java.util.function.Consumer<ByteBuf> writer) {
+        ByteBuf buffer = allocator.buffer();
+        try {
+            writer.accept(buffer);
+            return buffer;
+        } catch (RuntimeException | Error e) {
+            buffer.release();
+            throw e;
+        }
+    }
+
+    private static void validateRow(List<?> row, List<MssqlTableValue.Column> columns, boolean[] nullable) {
+        if (row.size() != columns.size()) {
+            throw new IllegalArgumentException("TVP row width must match the column count");
+        }
+        for (int i = 0; i < row.size(); i++) {
+            Object cell = row.get(i);
+            if (cell == null) {
+                nullable[i] = true;
+            } else {
+                SqlServerType type = columns.get(i).getType();
+                if (isDecimal(type)) {
+                    normalizeDecimal(cell, columns.get(i));
+                }
+                if (type == SqlServerType.VARBINARY) {
+                    if (!(cell instanceof byte[])) {
+                        throw new IllegalArgumentException("VARBINARY columns require byte[] or null cells");
+                    }
+                    if (!columns.get(i).isMax() && ((byte[]) cell).length > 8000) {
+                        throw new IllegalArgumentException("Initial VARBINARY support accepts at most 8000 bytes per cell");
+                    }
+                }
+                if (type == SqlServerType.NVARCHAR) {
+                    if (!(cell instanceof String)) {
+                        throw new IllegalArgumentException("NVARCHAR columns require String or null cells");
+                    }
+                    if (!columns.get(i).isMax() && ((String) cell).length() > 4000) {
+                        throw new IllegalArgumentException("Initial NVARCHAR support accepts at most 4000 UTF-16 code units per cell");
+                    }
+                }
+                if (type == SqlServerType.DATE) {
+                    if (!(cell instanceof java.time.LocalDate)) {
+                        throw new IllegalArgumentException("DATE columns require LocalDate or null cells");
+                    }
+                    int year = ((java.time.LocalDate) cell).getYear();
+                    if (year < 1 || year > 9999) {
+                        throw new IllegalArgumentException("DATE values must be between 0001-01-01 and 9999-12-31");
+                    }
+                }
+                if (type == SqlServerType.GUID && !(cell instanceof java.util.UUID)) {
+                    throw new IllegalArgumentException("GUID columns require UUID or null cells");
+                }
+                if (type == SqlServerType.BIT && !(cell instanceof Boolean)) {
+                    throw new IllegalArgumentException("BIT columns require Boolean or null cells");
+                }
+                if (type == SqlServerType.SMALLINT && !(cell instanceof Short)) {
+                    throw new IllegalArgumentException("SMALLINT columns require Short or null cells");
+                }
+                if (type == SqlServerType.INTEGER && !(cell instanceof Integer)) {
+                    throw new IllegalArgumentException("INTEGER columns require Integer or null cells");
+                }
+                if (type == SqlServerType.BIGINT && !(cell instanceof Long)) {
+                    throw new IllegalArgumentException("BIGINT columns require Long or null cells");
+                }
+            }
+        }
+    }
+
+    private static void writeMetadata(ByteBuf buffer, MssqlTableValue table, String[] names, Collation collation, boolean[] nullable) {
+        // RpcEncoding.encodeHeader writes TVPTYPE (0xF3) separately.
+        buffer.writeByte(0); // DbName must be empty.
+        writeIdentifier(buffer, names[0]);
+        writeIdentifier(buffer, names[1]);
+
+        buffer.writeShortLE(table.getColumns().size());
+        for (int i = 0; i < table.getColumns().size(); i++) {
+            buffer.writeIntLE(0); // UserType.
+            // Buffered tables infer nullability; streaming tables allow future NULL cells.
+            // SQL Server still enforces the declared table type constraints.
+            buffer.writeShortLE(nullable[i] ? 1 : 0); // fNullable.
+            SqlServerType type = table.getColumns().get(i).getType();
+            if (isDecimal(type)) {
+                MssqlTableValue.Column column = table.getColumns().get(i);
+                buffer.writeByte(type == SqlServerType.DECIMAL ? 0x6a : 0x6c);
+                buffer.writeByte(decimalLength(column.getPrecision()));
+                buffer.writeByte(column.getPrecision());
+                buffer.writeByte(column.getScale());
+            } else if (type == SqlServerType.VARBINARY) {
+                buffer.writeByte(0xa5); // BIGVARBINARY.
+                buffer.writeShortLE(table.getColumns().get(i).isMax() ? 0xffff : 8000); // No collation.
+            } else if (type == SqlServerType.NVARCHAR) {
+                buffer.writeByte(0xe7); // NVARCHARTYPE.
+                buffer.writeShortLE(table.getColumns().get(i).isMax() ? 0xffff : 8000);
+                collation.encode(buffer);
+            } else if (type == SqlServerType.DATE) {
+                buffer.writeByte(0x28); // DATENTYPE has no length in TYPE_INFO.
+            } else if (type == SqlServerType.GUID) {
+                buffer.writeByte(0x24); // GUIDTYPE.
+                buffer.writeByte(16);
+            } else if (type == SqlServerType.BIT) {
+                buffer.writeByte(0x68); // BITNTYPE.
+                buffer.writeByte(1);
+            } else {
+                buffer.writeByte(0x26); // INTNTYPE.
+                buffer.writeByte(type == SqlServerType.BIGINT ? 8 : type == SqlServerType.SMALLINT ? 2 : 4);
+            }
+            buffer.writeByte(0); // Column name must be empty in a TVP.
+        }
+        buffer.writeByte(0); // End of optional metadata.
+    }
+
+    private static void writeRow(ByteBuf buffer, List<?> row, List<MssqlTableValue.Column> columns) {
+        buffer.writeByte(1); // TVP_ROW.
+        for (int i = 0; i < row.size(); i++) {
+            Object cell = row.get(i);
+            if (columns.get(i).getType() == SqlServerType.VARBINARY) {
+                if (columns.get(i).isMax()) {
+                    writePlpBytes(buffer, (byte[]) cell);
+                } else if (cell == null) {
+                    buffer.writeShortLE(0xffff);
+                } else {
+                    byte[] value = (byte[]) cell;
+                    buffer.writeShortLE(value.length);
+                    buffer.writeBytes(value);
+                }
+            } else if (columns.get(i).getType() == SqlServerType.NVARCHAR) {
+                if (columns.get(i).isMax()) {
+                    writePlpBytes(buffer, cell == null ? null : ((String) cell).getBytes(StandardCharsets.UTF_16LE));
+                } else if (cell == null) {
+                    buffer.writeShortLE(0xffff);
+                } else {
+                    String value = (String) cell;
+                    buffer.writeShortLE(value.length() * 2);
+                    buffer.writeCharSequence(value, StandardCharsets.UTF_16LE);
+                }
+            } else if (cell == null) {
+                buffer.writeByte(0); // NULL: zero length, no value bytes.
+            } else if (isDecimal(columns.get(i).getType())) {
+                MssqlTableValue.Column column = columns.get(i);
+                BigDecimal value = normalizeDecimal(cell, column);
+                int length = decimalLength(column.getPrecision());
+                byte[] magnitude = value.unscaledValue().abs().toByteArray();
+                buffer.writeByte(length);
+                buffer.writeByte(value.signum() < 0 ? 0 : 1);
+                // Convert the magnitude to fixed-width unsigned little-endian bytes.
+                for (int j = 0; j < length - 1; j++) {
+                    int source = magnitude.length - 1 - j;
+                    buffer.writeByte(source >= 0 ? magnitude[source] : 0);
+                }
+            } else if (columns.get(i).getType() == SqlServerType.DATE) {
+                java.time.LocalDate date = (java.time.LocalDate) cell;
+                long days = java.time.temporal.ChronoUnit.DAYS.between(
+                        java.time.LocalDate.of(1, 1, 1), date);
+                buffer.writeByte(3);
+                buffer.writeMediumLE((int) days);
+            } else if (columns.get(i).getType() == SqlServerType.GUID) {
+                java.util.UUID uuid = (java.util.UUID) cell;
+                long msb = uuid.getMostSignificantBits();
+                buffer.writeByte(16);
+                // SQL Server GUID order: first 4/2/2 bytes little-endian,
+                // followed by the final eight bytes in UUID order.
+                buffer.writeIntLE((int) (msb >>> 32));
+                buffer.writeShortLE((int) (msb >>> 16));
+                buffer.writeShortLE((int) msb);
+                buffer.writeLong(uuid.getLeastSignificantBits());
+            } else if (columns.get(i).getType() == SqlServerType.BIT) {
+                buffer.writeByte(1);
+                buffer.writeByte((Boolean) cell ? 1 : 0);
+            } else if (columns.get(i).getType() == SqlServerType.SMALLINT) {
+                buffer.writeByte(2);
+                buffer.writeShortLE((Short) cell);
+            } else if (columns.get(i).getType() == SqlServerType.BIGINT) {
+                buffer.writeByte(8);
+                buffer.writeLongLE((Long) cell);
+            } else {
+                buffer.writeByte(4);
+                buffer.writeIntLE((Integer) cell);
+            }
         }
     }
 
