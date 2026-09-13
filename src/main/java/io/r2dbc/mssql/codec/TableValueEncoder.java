@@ -19,6 +19,7 @@ package io.r2dbc.mssql.codec;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.r2dbc.mssql.MssqlTableValue;
+import io.r2dbc.spi.Blob;
 import io.r2dbc.mssql.message.type.Collation;
 import io.r2dbc.mssql.message.type.SqlServerType;
 import io.r2dbc.mssql.message.type.TdsDataType;
@@ -34,7 +35,7 @@ import java.util.List;
 /**
  * Initial input TVP encoder for scalar columns, including NULL cells.
  * Uses MS-TDS 2.2.5.5.5 metadata and row tokens.
- * Buffered tables retain their original encoding. Streaming sources buffer one row at a time.
+ * Buffered scalar tables retain their original encoding. Blob cells stream one chunk at a time.
  */
 final class TableValueEncoder {
 
@@ -78,7 +79,7 @@ final class TableValueEncoder {
                 collation = context.getRequiredValueContext(RpcParameterContext.CharacterValueContext.class).getCollation();
             }
         }
-        if (table.getRowPublisher() != null) {
+        if (table.getRowPublisher() != null || table.getRows().stream().anyMatch(TableValueEncoder::hasBlob)) {
             return encodeStream(allocator, table, names, collation);
         }
         boolean[] nullable = new boolean[table.getColumns().size()];
@@ -121,10 +122,25 @@ final class TableValueEncoder {
                     java.util.Arrays.fill(nullable, true);
                     Mono<ByteBuf> metadata = Mono.fromSupplier(() -> allocateAndWrite(allocator,
                             buffer -> writeMetadata(buffer, table, names, collation, nullable)));
-                    Flux<ByteBuf> rows = Flux.from(table.getRowPublisher()).concatMap(row -> Mono.fromSupplier(() -> {
+                    Flux<? extends List<?>> source = table.getRowPublisher() == null ?
+                            Flux.fromIterable(table.getRows()) : Flux.from(table.getRowPublisher());
+                    Flux<ByteBuf> rows = source.concatMap(row -> Flux.defer(() -> {
                         validateRow(row, table.getColumns(), nullable);
-                        return allocateAndWrite(allocator, buffer -> writeRow(buffer, row, table.getColumns()));
-                    }), 0); // No row prefetch; read and encode one row per downstream request.
+                        if (!hasBlob(row)) {
+                            return Mono.fromSupplier(() -> allocateAndWrite(allocator,
+                                    buffer -> writeRow(buffer, row, table.getColumns()))).flux();
+                        }
+                        return Flux.concat(
+                                Mono.fromSupplier(() -> allocateAndWrite(allocator, buffer -> buffer.writeByte(1))),
+                                Flux.range(0, row.size()).concatMap(index -> {
+                                    Object cell = row.get(index);
+                                    if (cell instanceof Blob) {
+                                        return streamBlob(allocator, (Blob) cell);
+                                    }
+                                    return Mono.fromSupplier(() -> allocateAndWrite(allocator,
+                                            buffer -> writeCell(buffer, cell, table.getColumns().get(index)))).flux();
+                                }, 0));
+                    }), 0); // No row or cell prefetch.
                     return Flux.concat(metadata, rows,
                             Mono.fromSupplier(() -> allocateAndWrite(allocator, buffer -> buffer.writeByte(0))));
                 });
@@ -157,6 +173,9 @@ final class TableValueEncoder {
                     normalizeDecimal(cell, columns.get(i));
                 }
                 if (type == SqlServerType.VARBINARY) {
+                    if (cell instanceof Blob && columns.get(i).isMax()) {
+                        continue;
+                    }
                     if (!(cell instanceof byte[])) {
                         throw new IllegalArgumentException("VARBINARY columns require byte[] or null cells");
                     }
@@ -246,71 +265,104 @@ final class TableValueEncoder {
     private static void writeRow(ByteBuf buffer, List<?> row, List<MssqlTableValue.Column> columns) {
         buffer.writeByte(1); // TVP_ROW.
         for (int i = 0; i < row.size(); i++) {
-            Object cell = row.get(i);
-            if (columns.get(i).getType() == SqlServerType.VARBINARY) {
-                if (columns.get(i).isMax()) {
-                    writePlpBytes(buffer, (byte[]) cell);
-                } else if (cell == null) {
-                    buffer.writeShortLE(0xffff);
-                } else {
-                    byte[] value = (byte[]) cell;
-                    buffer.writeShortLE(value.length);
-                    buffer.writeBytes(value);
-                }
-            } else if (columns.get(i).getType() == SqlServerType.NVARCHAR) {
-                if (columns.get(i).isMax()) {
-                    writePlpBytes(buffer, cell == null ? null : ((String) cell).getBytes(StandardCharsets.UTF_16LE));
-                } else if (cell == null) {
-                    buffer.writeShortLE(0xffff);
-                } else {
-                    String value = (String) cell;
-                    buffer.writeShortLE(value.length() * 2);
-                    buffer.writeCharSequence(value, StandardCharsets.UTF_16LE);
-                }
-            } else if (cell == null) {
-                buffer.writeByte(0); // NULL: zero length, no value bytes.
-            } else if (isDecimal(columns.get(i).getType())) {
-                MssqlTableValue.Column column = columns.get(i);
-                BigDecimal value = normalizeDecimal(cell, column);
-                int length = decimalLength(column.getPrecision());
-                byte[] magnitude = value.unscaledValue().abs().toByteArray();
-                buffer.writeByte(length);
-                buffer.writeByte(value.signum() < 0 ? 0 : 1);
-                // Convert the magnitude to fixed-width unsigned little-endian bytes.
-                for (int j = 0; j < length - 1; j++) {
-                    int source = magnitude.length - 1 - j;
-                    buffer.writeByte(source >= 0 ? magnitude[source] : 0);
-                }
-            } else if (columns.get(i).getType() == SqlServerType.DATE) {
-                java.time.LocalDate date = (java.time.LocalDate) cell;
-                long days = java.time.temporal.ChronoUnit.DAYS.between(
-                        java.time.LocalDate.of(1, 1, 1), date);
-                buffer.writeByte(3);
-                buffer.writeMediumLE((int) days);
-            } else if (columns.get(i).getType() == SqlServerType.GUID) {
-                java.util.UUID uuid = (java.util.UUID) cell;
-                long msb = uuid.getMostSignificantBits();
-                buffer.writeByte(16);
-                // SQL Server GUID order: first 4/2/2 bytes little-endian,
-                // followed by the final eight bytes in UUID order.
-                buffer.writeIntLE((int) (msb >>> 32));
-                buffer.writeShortLE((int) (msb >>> 16));
-                buffer.writeShortLE((int) msb);
-                buffer.writeLong(uuid.getLeastSignificantBits());
-            } else if (columns.get(i).getType() == SqlServerType.BIT) {
-                buffer.writeByte(1);
-                buffer.writeByte((Boolean) cell ? 1 : 0);
-            } else if (columns.get(i).getType() == SqlServerType.SMALLINT) {
-                buffer.writeByte(2);
-                buffer.writeShortLE((Short) cell);
-            } else if (columns.get(i).getType() == SqlServerType.BIGINT) {
-                buffer.writeByte(8);
-                buffer.writeLongLE((Long) cell);
-            } else {
-                buffer.writeByte(4);
-                buffer.writeIntLE((Integer) cell);
-            }
+            writeCell(buffer, row.get(i), columns.get(i));
         }
+    }
+
+    private static void writeCell(ByteBuf buffer, Object cell, MssqlTableValue.Column column) {
+        if (column.getType() == SqlServerType.VARBINARY) {
+            if (column.isMax()) {
+                writePlpBytes(buffer, (byte[]) cell);
+            } else if (cell == null) {
+                buffer.writeShortLE(0xffff);
+            } else {
+                byte[] value = (byte[]) cell;
+                buffer.writeShortLE(value.length);
+                buffer.writeBytes(value);
+            }
+        } else if (column.getType() == SqlServerType.NVARCHAR) {
+            if (column.isMax()) {
+                writePlpBytes(buffer, cell == null ? null : ((String) cell).getBytes(StandardCharsets.UTF_16LE));
+            } else if (cell == null) {
+                buffer.writeShortLE(0xffff);
+            } else {
+                String value = (String) cell;
+                buffer.writeShortLE(value.length() * 2);
+                buffer.writeCharSequence(value, StandardCharsets.UTF_16LE);
+            }
+        } else if (cell == null) {
+            buffer.writeByte(0); // NULL: zero length, no value bytes.
+        } else if (isDecimal(column.getType())) {
+            BigDecimal value = normalizeDecimal(cell, column);
+            int length = decimalLength(column.getPrecision());
+            byte[] magnitude = value.unscaledValue().abs().toByteArray();
+            buffer.writeByte(length);
+            buffer.writeByte(value.signum() < 0 ? 0 : 1);
+            // Convert the magnitude to fixed-width unsigned little-endian bytes.
+            for (int j = 0; j < length - 1; j++) {
+                int source = magnitude.length - 1 - j;
+                buffer.writeByte(source >= 0 ? magnitude[source] : 0);
+            }
+        } else if (column.getType() == SqlServerType.DATE) {
+            java.time.LocalDate date = (java.time.LocalDate) cell;
+            long days = java.time.temporal.ChronoUnit.DAYS.between(
+                    java.time.LocalDate.of(1, 1, 1), date);
+            buffer.writeByte(3);
+            buffer.writeMediumLE((int) days);
+        } else if (column.getType() == SqlServerType.GUID) {
+            java.util.UUID uuid = (java.util.UUID) cell;
+            long msb = uuid.getMostSignificantBits();
+            buffer.writeByte(16);
+            // SQL Server GUID order: first 4/2/2 bytes little-endian,
+            // followed by the final eight bytes in UUID order.
+            buffer.writeIntLE((int) (msb >>> 32));
+            buffer.writeShortLE((int) (msb >>> 16));
+            buffer.writeShortLE((int) msb);
+            buffer.writeLong(uuid.getLeastSignificantBits());
+        } else if (column.getType() == SqlServerType.BIT) {
+            buffer.writeByte(1);
+            buffer.writeByte((Boolean) cell ? 1 : 0);
+        } else if (column.getType() == SqlServerType.SMALLINT) {
+            buffer.writeByte(2);
+            buffer.writeShortLE((Short) cell);
+        } else if (column.getType() == SqlServerType.BIGINT) {
+            buffer.writeByte(8);
+            buffer.writeLongLE((Long) cell);
+        } else {
+            buffer.writeByte(4);
+            buffer.writeIntLE((Integer) cell);
+        }
+    }
+
+
+    private static boolean hasBlob(List<?> row) {
+        return row.stream().anyMatch(Blob.class::isInstance);
+    }
+
+    private static Flux<ByteBuf> streamBlob(ByteBufAllocator allocator, Blob blob) {
+        return Flux.defer(() -> {
+            java.util.concurrent.atomic.AtomicBoolean subscribed = new java.util.concurrent.atomic.AtomicBoolean();
+            return Flux.usingWhen(Mono.just(blob), value -> Flux.concat(
+                        Mono.fromSupplier(() -> allocateAndWrite(allocator, buffer -> buffer.writeLongLE(-2L))),
+                        Flux.defer(() -> Flux.from(value.stream()))
+                                .doOnSubscribe(subscription -> subscribed.set(true))
+                                .filter(java.nio.ByteBuffer::hasRemaining)
+                                .concatMap(chunk -> Mono.fromSupplier(() -> allocateAndWrite(allocator, buffer -> {
+                                    java.nio.ByteBuffer bytes = chunk.duplicate();
+                                    buffer.writeIntLE(bytes.remaining());
+                                    buffer.writeBytes(bytes);
+                                })), 0),
+                        Mono.fromSupplier(() -> allocateAndWrite(allocator, buffer -> buffer.writeIntLE(0)))),
+                    value -> discardUnsubscribedBlob(value, subscribed),
+                    (value, error) -> discardUnsubscribedBlob(value, subscribed),
+                    value -> discardUnsubscribedBlob(value, subscribed));
+        });
+    }
+
+    private static Mono<Void> discardUnsubscribedBlob(Blob blob, java.util.concurrent.atomic.AtomicBoolean subscribed) {
+        // SPI discard() is for unconsumed Blobs. Once subscribed, the stream owns
+        // cleanup and cancellation; discard() may otherwise subscribe a second time.
+        return Mono.defer(() -> subscribed.get() ? Mono.empty() : Mono.from(blob.discard()));
     }
 
     private static void writePlpBytes(ByteBuf buffer, byte[] bytes) {

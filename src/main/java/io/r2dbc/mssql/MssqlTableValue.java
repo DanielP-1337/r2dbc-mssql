@@ -28,8 +28,10 @@ import java.util.List;
 /**
  * Value for a SQL Server table-valued parameter with buffered or publisher-backed rows.
  *
- * <p>Publisher-backed rows are consumed during execution. Each row is buffered
- * for encoding; streaming within an individual cell is not yet supported.
+ * <p>Publisher-backed rows are consumed during execution. Scalar cells are buffered;
+ * Blob values in VARBINARY(MAX) columns are streamed in chunks, including in buffered rows.
+ * A Blob is consumed once. After subscription, cancellation releases its stream resources.
+ * An acquired Blob whose stream has not been subscribed is released through discard().
  */
 public final class MssqlTableValue {
 
