@@ -16,10 +16,11 @@ This driver provides the following features:
 * Execution of parametrized statements (direct and cursored execution)
 * Extensive type support (including `TEXT`, `VARCHAR(MAX)`, `IMAGE`, `VARBINARY(MAX)` and national variants, see below for exceptions)
 * Execution of stored procedures
+* Input table-valued parameters with buffered or publisher-backed rows and Blob/Clob cell streaming
 
 Next steps:
 
-* Add support for TVP and UDTs
+* Extend TVP type and metadata support, and add UDT support
 
 ## Code of Conduct
 
@@ -283,6 +284,136 @@ values are fully materialized in the client before decoding. Make sure to accoun
 [java-string-ref]: https://docs.oracle.com/javase/8/docs/api/java/lang/String.html
 [java-uuid-ref]: https://docs.oracle.com/javase/8/docs/api/java/util/UUID.html
 [java-zdt-ref]: https://docs.oracle.com/javase/8/docs/api/java/time/ZonedDateTime.html
+
+## Table-Valued Parameters
+
+`MssqlTableValue` binds a table value to a parameterized statement.
+Create the corresponding SQL Server table type in the target database first.
+TVPs are input-only. They are declared `READONLY`; query results are consumed through the usual R2DBC result API.
+
+### Buffered rows
+
+Create this type once as part of the database schema:
+
+```sql
+CREATE TYPE dbo.OrderInput AS TABLE (
+    id INT NOT NULL,
+    amount DECIMAL(18, 2) NULL,
+    note NVARCHAR(MAX) NULL,
+    payload VARBINARY(MAX) NULL
+);
+```
+
+Declare columns and cells in the same order as the SQL table type:
+
+```java
+import io.r2dbc.mssql.MssqlTableValue;
+import io.r2dbc.mssql.message.type.SqlServerType;
+import java.math.BigDecimal;
+import reactor.core.publisher.Flux;
+
+MssqlTableValue orders = MssqlTableValue.builder("dbo.OrderInput")
+    .column("id", SqlServerType.INTEGER)
+    .column("amount", SqlServerType.DECIMAL, 18, 2)
+    .columnMax("note", SqlServerType.NVARCHAR)
+    .columnMax("payload", SqlServerType.VARBINARY)
+    .row(1, new BigDecimal("12.50"), "First order", new byte[] {1, 2})
+    .row(2, null, "", new byte[0])
+    .build();
+
+// connection is an open R2DBC Connection managed by the caller.
+Flux<Integer> ids = Flux.from(connection.createStatement(
+        "SELECT id FROM @orders ORDER BY id")
+    .bind("orders", orders)
+    .execute())
+    .concatMap(result -> result.map((row, metadata) -> row.get("id", Integer.class)));
+```
+
+Subscribe to and consume `ids` as part of the application's reactive pipeline.
+The same binding can be used in a SQL command that calls a stored procedure accepting the table type.
+
+Each row must have exactly one cell per declared column. Column order determines the mapping; column names do not reorder cells.
+A table built without rows is an empty TVP. A `null` cell is SQL `NULL`; for a single-column table use `.row((Object) null)`.
+Empty strings and empty binary values remain distinct from `NULL`.
+Bind the table value directly; support for `Parameters.in(table)` is pending.
+`bindNull(..., MssqlTableValue.class)` cannot supply the required SQL table type name; use an explicitly constructed empty table when no rows are needed.
+
+### Supported TVP cell types
+
+This table describes TVP input cells. The general data type mapping above does not imply the same conversions inside TVPs.
+
+| SQL column | Builder type | Java cell value |
+| --- | --- | --- |
+| `BIT` | `SqlServerType.BIT` | `Boolean` |
+| `SMALLINT` | `SqlServerType.SMALLINT` | `Short` |
+| `INT` | `SqlServerType.INTEGER` | `Integer` |
+| `BIGINT` | `SqlServerType.BIGINT` | `Long` |
+| `UNIQUEIDENTIFIER` | `SqlServerType.GUID` | `java.util.UUID` |
+| `DATE` | `SqlServerType.DATE` | `java.time.LocalDate`, years 1 through 9999 |
+| `DECIMAL(p,s)`, `NUMERIC(p,s)` | `DECIMAL` or `NUMERIC`, with precision and scale | `BigDecimal` |
+| `NVARCHAR(n)` | `SqlServerType.NVARCHAR` | `String`, at most 4000 UTF-16 code units |
+| `NVARCHAR(MAX)` | `.columnMax(..., SqlServerType.NVARCHAR)` | `String` or `io.r2dbc.spi.Clob` |
+| `VARBINARY(n)` | `SqlServerType.VARBINARY` | `byte[]`, at most 8000 bytes |
+| `VARBINARY(MAX)` | `.columnMax(..., SqlServerType.VARBINARY)` | `byte[]` or `io.r2dbc.spi.Blob` |
+
+All listed cell types also accept `null`, subject to the server's table constraints.
+Decimal precision must be 1 through 38 and scale must be 0 through precision.
+Values are rescaled exactly; precision overflow and values requiring rounding are rejected.
+Non-MAX string and binary columns advertise the limits above; the SQL table type can impose a smaller limit.
+Use `columnMax` explicitly for MAX columns. It does not automatically follow from a large value.
+Explicit TVP `NVARCHAR` columns remain Unicode when `sendStringParametersAsUnicode=false`.
+
+### Streaming rows and cells
+
+Use `.rows(Publisher<? extends List<?>>)` for rows produced during execution.
+It cannot be combined with `.row(...)`.
+Clobs and Blobs stream their contents in MAX columns, including when the surrounding rows were added with `.row(...)`.
+
+The following example uses the same `dbo.OrderInput` type:
+
+```java
+import io.r2dbc.spi.Blob;
+import io.r2dbc.spi.Clob;
+import java.nio.ByteBuffer;
+import java.util.Arrays;
+import java.util.List;
+
+MssqlTableValue streamedOrders = MssqlTableValue.builder("dbo.OrderInput")
+    .column("id", SqlServerType.INTEGER)
+    .column("amount", SqlServerType.DECIMAL, 18, 2)
+    .columnMax("note", SqlServerType.NVARCHAR)
+    .columnMax("payload", SqlServerType.VARBINARY)
+    .rows(Flux.defer(() -> {
+        Clob note = Clob.from(Flux.<CharSequence>just("First ", "order"));
+        Blob payload = Blob.from(Flux.just(
+            ByteBuffer.wrap(new byte[] {1, 2}),
+            ByteBuffer.wrap(new byte[] {3, 4})));
+        return Flux.<List<?>>just(
+            Arrays.asList(1, new BigDecimal("12.50"), note, payload));
+    }))
+    .build();
+```
+
+Bind `streamedOrders` as in the buffered example.
+Use demand-aware publishers; a publisher that has already collected all rows still retains that collection.
+The encoder does not subscribe to row or cell sources at bind time.
+It processes rows and LOB cells sequentially, without row or cell prefetch.
+Scalar-only buffered tables are encoded as a complete value; publisher-backed scalar rows are encoded one row at a time.
+Strings and byte arrays remain fully materialized even in MAX columns.
+LOB streaming allocates an encoded buffer for each source chunk; memory also depends on source chunk sizes and downstream transport buffering.
+Clob encoding preserves UTF-16 code units across source chunk boundaries, including split surrogate pairs.
+Blob encoding preserves the position and limit of supplied ByteBuffers.
+
+### Ownership, validation, and current limits
+
+* Do not mutate buffered cell objects after building a table, or published rows and chunks after emitting them. Mutable cell objects are not deep-copied.
+* Row publishers must not emit `null` rows. Cells may be `null`. Row values are validated when encoded; with streaming, errors can occur after earlier rows have been transmitted.
+* Blob and Clob instances are consumed once. For repeated execution, supply a repeatable row publisher that creates fresh LOB instances for each subscription, as above.
+* After a LOB stream is subscribed, cancellation is propagated to that stream. The driver calls `discard()` for an acquired LOB only if its stream has not been subscribed.
+* Applications remain responsible for LOBs not reached by the encoder, including values in later rows or cells after an earlier failure, and values belonging to a statement that is never executed.
+* Type names currently require a simple `schema.type` form: each component starts with an ASCII letter or underscore, followed by up to 127 ASCII letters, digits, or underscores. Quoted identifiers and database-qualified names are not supported.
+* Declare between 1 and 1024 columns. Server constraints remain authoritative; column declarations are not discovered from the server.
+* Server-default columns and sort/unique metadata are not supported. Datatypes not listed above are not currently accepted by the TVP encoder.
 
 ## Logging
 
