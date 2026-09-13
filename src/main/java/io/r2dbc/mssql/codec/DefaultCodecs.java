@@ -108,17 +108,24 @@ public final class DefaultCodecs implements Codecs {
         Assert.requireNonNull(context, "RpcParameterContext must not be null");
         Assert.requireNonNull(value, "Value must not be null");
 
-        if (value instanceof io.r2dbc.mssql.MssqlTableValue) {
-            return TableValueEncoder.encode(allocator, context, (io.r2dbc.mssql.MssqlTableValue) value);
+        Object parameterValue = value instanceof Parameter ? ((Parameter) value).getValue() : value;
+
+        if (parameterValue instanceof io.r2dbc.mssql.MssqlTableValue) {
+            if (!context.isIn() || value instanceof Parameter.Out) {
+                throw new IllegalArgumentException("Table-valued parameters are input-only");
+            }
+            if (context.getServerType() != null || (value instanceof Parameter &&
+                    !(((Parameter) value).getType() instanceof Type.InferredType))) {
+                throw new IllegalArgumentException("TVP type metadata must be declared by MssqlTableValue; use direct binding or Parameters.in(table)");
+            }
+            return TableValueEncoder.encode(allocator, context, (io.r2dbc.mssql.MssqlTableValue) parameterValue);
         }
 
-        Object parameterValue = value;
         SqlServerType serverType;
 
         if (value instanceof Parameter) {
 
             Parameter parameter = (Parameter) value;
-            parameterValue = parameter.getValue();
 
             if (parameter.getType() instanceof Type.InferredType && parameterValue == null) {
                 return encodeNull(allocator, parameter.getType().getJavaType());

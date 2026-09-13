@@ -335,7 +335,8 @@ The same binding can be used in a SQL command that calls a stored procedure acce
 Each row must have exactly one cell per declared column. Column order determines the mapping; column names do not reorder cells.
 A table built without rows is an empty TVP. A `null` cell is SQL `NULL`; for a single-column table use `.row((Object) null)`.
 Empty strings and empty binary values remain distinct from `NULL`.
-Bind the table value directly; support for `Parameters.in(table)` is pending.
+Bind the table value directly or wrap it with `io.r2dbc.spi.Parameters.in(table)`.
+TVP type metadata comes from `MssqlTableValue`; explicit parameter type overrides and output parameters are rejected.
 `bindNull(..., MssqlTableValue.class)` cannot supply the required SQL table type name; use an explicitly constructed empty table when no rows are needed.
 
 ### Supported TVP cell types
