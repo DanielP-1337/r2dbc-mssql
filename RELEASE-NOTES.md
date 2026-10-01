@@ -1,8 +1,11 @@
-# 1.1.0-danielp.2 - Named Instances, Kerberos and TLS
+# 1.1.1-danielp - Named Instances, Kerberos and TLS
 
 Regular GitHub release of the DanielP-1337 fork of r2dbc-mssql.
-This release updates documentation and the project version. Production driver
-source is unchanged from `1.1.0-danielp.1`.
+This release aligns the Maven project version and documentation with the new
+`1.1.1-danielp` tag. The previous compatibility tag `1.1.0-danielp` pointed to
+the same commit as `1.1.0-danielp.2`, whose source POM still declared that older
+version. Production driver source is unchanged from those two tags.
+No changes from `1.1.0-danielp.3` are included.
 
 ## Features
 
@@ -16,7 +19,7 @@ source is unchanged from `1.1.0-danielp.1`.
 
 Add `https://jitpack.io` to your Maven or Gradle repositories and use:
 
-`com.github.DanielP-1337:r2dbc-mssql:1.1.0-danielp.2`
+`com.github.DanielP-1337:r2dbc-mssql:1.1.1-danielp`
 
 Windows Integrated Security additionally requires:
 
@@ -27,7 +30,7 @@ occurrences, to avoid loading both driver variants.
 
 ## Validation
 
-Manual Windows lab validation on September 11, 2026 used the previous release
+Manual Windows lab validation on September 11, 2026 used the `1.1.0-danielp.1` release
 checkout, with a test-only extension for named-instance configuration:
 
 - Explicit-port connection: expected Windows identity and KERBEROS verified.
@@ -36,8 +39,9 @@ checkout, with a test-only extension for named-instance configuration:
   `trustServerCertificate=false` (1 test, 0 failures/errors/skips).
 - Negative TLS trust test: correctly failed with SSLHandshakeException and
   PKIX path building failed when the private CA was absent from Java trust.
-- The preceding release's unit suite passed 948 tests. The new version is rebuilt
-  and its JitPack dependency is resolved before this release is published.
+- The previously recorded unit suite passed 948 tests. These are historical
+  validation results; they do not represent a new test run for this version.
+  Rebuild this version and resolve its JitPack dependency before publication.
 
 The production driver code is unchanged. The complete database integration suite
 and a dedicated wrong-hostname negative test were not run. Live Windows tests
@@ -56,8 +60,8 @@ TLS separately requires a valid server certificate matching the hostname and a
 trusted chain in the Java truststore. Windows root trust alone is not sufficient
 for every JVM configuration. Keep `trustServerCertificate=false` for validation.
 
-See the [README shipped with this tag](https://github.com/DanielP-1337/r2dbc-mssql/blob/1.1.0-danielp.2/README.md).
+See the [README shipped with this tag](https://github.com/DanielP-1337/r2dbc-mssql/blob/1.1.1-danielp/README.md).
 
-The existing `1.1.0-danielp.1` tag and artifacts remain unchanged. This is a regular
-GitHub release; the `-danielp.2` suffix remains a prerelease identifier under strict
+All existing tags and published artifacts remain unchanged. This is a regular
+GitHub release; the `-danielp` suffix remains a prerelease identifier under strict
 Semantic Versioning. This fork release is not an upstream project endorsement.

@@ -31,7 +31,7 @@ report unacceptable behavior to [info@r2dbc.io](mailto:info@r2dbc.io).
 ## DanielP-1337 fork release
 
 This fork adds SQL Server named instance discovery and Windows Integrated Security.
-The current fork version is **1.1.0-danielp.2**, distributed through JitPack.
+The current fork version is **1.1.1-danielp**, distributed through JitPack.
 This is an independently maintained fork release; it is not an upstream release.
 
 Use the following Maven configuration for this fork:
@@ -48,7 +48,7 @@ Use the following Maven configuration for this fork:
   <dependency>
     <groupId>com.github.DanielP-1337</groupId>
     <artifactId>r2dbc-mssql</artifactId>
-    <version>1.1.0-danielp.2</version>
+    <version>1.1.1-danielp</version>
   </dependency>
   <!-- Required when using Windows Integrated Security -->
   <dependency>
@@ -66,12 +66,12 @@ For Gradle, add `maven { url = uri("https://jitpack.io") }` to your dependency
 repositories and use:
 
 ```groovy
-implementation 'com.github.DanielP-1337:r2dbc-mssql:1.1.0-danielp.2'
+implementation 'com.github.DanielP-1337:r2dbc-mssql:1.1.1-danielp'
 implementation 'net.java.dev.jna:jna-platform:5.17.0' // Windows Integrated Security
 ```
 
 The GitHub release label and the version string are separate: this is published
-as a regular GitHub release, while the `-danielp.2` suffix is a prerelease
+as a regular GitHub release, while the `-danielp` suffix is a prerelease
 identifier under strict Semantic Versioning. Pin the complete version string.
 
 ## Getting Started
@@ -370,7 +370,10 @@ and the [JSSE truststore documentation](https://docs.oracle.com/en/java/javase/1
 Manual lab validation on September 11, 2026 used the `1.1.0-danielp.1` release
 checkout. The integration test was locally extended to accept a named-instance
 setting; that test-only extension is not part of this release's repository test.
-The production driver source is unchanged in `1.1.0-danielp.2`.
+The production driver source in `1.1.1-danielp` is unchanged from
+`1.1.0-danielp.2` and its compatibility tag `1.1.0-danielp`.
+This release aligns the project version, documentation and new release tag;
+the existing published tags remain unchanged.
 
 | Check | Observed result |
 | --- | --- |
